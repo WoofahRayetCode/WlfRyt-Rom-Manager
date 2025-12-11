@@ -5,6 +5,7 @@ A GUI tool for bulk converting disc images to CHD format (PS1, PS2, and more)
 """
 
 import os
+import sys
 import subprocess
 import shutil
 import json
@@ -123,7 +124,17 @@ class ROMConverter:
         master.state('zoomed')
         
         # Config file location (portable: lives beside the app)
-        self.script_dir = Path(__file__).parent.resolve()
+        # Handle PyInstaller's temporary folder for bundled resources
+        if getattr(sys, 'frozen', False):
+            # Running as compiled executable
+            self.script_dir = Path(sys.executable).parent.resolve()
+            # PyInstaller extracts bundled files to sys._MEIPASS
+            self.bundle_dir = Path(getattr(sys, '_MEIPASS', self.script_dir))
+        else:
+            # Running as script
+            self.script_dir = Path(__file__).parent.resolve()
+            self.bundle_dir = self.script_dir
+        
         self.config_file = self.script_dir / ".rom_converter_config.json"
         
         # Variables
@@ -132,7 +143,12 @@ class ROMConverter:
         self.move_to_backup = BooleanVar(value=True)
         self.recursive = BooleanVar(value=True)
         self.is_converting = False
-        self.cpu_cores = multiprocessing.cpu_count()
+        # Keep one CPU core free for system responsiveness
+        total_cores = multiprocessing.cpu_count()
+        self.cpu_cores = max(1, total_cores - 1)
+        self.max_workers = self.cpu_cores  # Dynamic worker count
+        self.ram_threshold_percent = 90  # Throttle if RAM usage exceeds this
+        self.cpu_threshold_percent = 95  # Throttle if CPU usage exceeds this
         self.log_queue = Queue()
         self.total_original_size = 0
         self.total_chd_size = 0
@@ -161,8 +177,14 @@ class ROMConverter:
         self.metrics_lock = pythread.Lock()
         self.chdman_path = None  # Will store path to chdman executable
         
+        # Progress tracking for crash recovery
+        self.progress_file = self.script_dir / ".rom_converter_progress.json"
+        self.completed_files = set()  # Track completed conversions
+        self.current_batch_id = None
+        
         # Load saved configuration
         self.load_config()
+        self.load_progress()
 
         # Apply theme colors before UI construction
         self.set_theme_colors(self.current_theme)
@@ -209,9 +231,14 @@ class ROMConverter:
     
     def check_chdman(self):
         """Check if chdman is available"""
-        # First check for chdman.exe directly next to script
-        script_dir = Path(__file__).parent.resolve()
-        direct_chdman = script_dir / "chdman.exe"
+        # First check bundled resources (PyInstaller)
+        bundled_chdman = self.bundle_dir / "chdman.exe"
+        if bundled_chdman.exists():
+            self.chdman_path = str(bundled_chdman)
+            return True
+        
+        # Then check for chdman.exe directly next to the executable/script
+        direct_chdman = self.script_dir / "chdman.exe"
         if direct_chdman.exists():
             self.chdman_path = str(direct_chdman)
             return True
@@ -283,7 +310,8 @@ class ROMConverter:
         try:
             # Parse the release page to get version number
             req = urllib.request.Request(
-            direct_chdman = self.script_dir / "chdman.exe"
+                MAME_RELEASE_URL,
+                headers={'User-Agent': 'Mozilla/5.0'}
             )
             with urllib.request.urlopen(req, timeout=30) as response:
                 html = response.read().decode('utf-8')
@@ -487,12 +515,19 @@ class ROMConverter:
 
     def check_maxcso(self):
         """Check if maxcso is available for CSO/ZSO output"""
-        script_dir = Path(__file__).parent.resolve()
-        direct_maxcso = script_dir / "maxcso.exe"
+        # First check bundled resources (PyInstaller)
+        bundled_maxcso = self.bundle_dir / "maxcso.exe"
+        if bundled_maxcso.exists():
+            self.maxcso_path = str(bundled_maxcso)
+            return True
+        
+        # Then check for maxcso.exe directly next to the executable/script
+        direct_maxcso = self.script_dir / "maxcso.exe"
         if direct_maxcso.exists():
             self.maxcso_path = str(direct_maxcso)
             return True
 
+        # Check PATH as fallback
         maxcso = shutil.which("maxcso")
         if maxcso:
             self.maxcso_path = maxcso
@@ -736,6 +771,44 @@ Format Recommendations
                     self.maxcso_path = saved_maxcso
         except Exception as e:
             # Silently fail - use defaults
+            pass
+
+    def load_progress(self):
+        """Load progress from previous conversion sessions for crash recovery"""
+        try:
+            if self.progress_file.exists():
+                with open(self.progress_file, 'r') as f:
+                    data = json.load(f)
+                    self.completed_files = set(data.get('completed_files', []))
+                    self.current_batch_id = data.get('batch_id')
+                    if self.completed_files:
+                        self.log(f"📂 Loaded progress: {len(self.completed_files)} files previously completed")
+        except Exception as e:
+            self.log(f"⚠️  Could not load progress file: {e}")
+            self.completed_files = set()
+
+    def save_progress(self, source_dir):
+        """Save current conversion progress for crash recovery"""
+        try:
+            data = {
+                'batch_id': self.current_batch_id,
+                'source_dir': str(source_dir),
+                'completed_files': list(self.completed_files),
+                'timestamp': time.time()
+            }
+            with open(self.progress_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            self.log(f"⚠️  Could not save progress: {e}")
+
+    def clear_progress(self):
+        """Clear progress file after successful completion"""
+        try:
+            if self.progress_file.exists():
+                self.progress_file.unlink()
+                self.completed_files = set()
+                self.current_batch_id = None
+        except Exception:
             pass
 
     def _make_portable_path(self, path_value):
@@ -1160,8 +1233,9 @@ Format Recommendations
         scrollbar.config(command=self.log_text.yview)
         
         # Status bar
+        total_cores = multiprocessing.cpu_count()
         self.status_label = Label(self.main_frame, 
-                                 text=f"▶ READY | {self.cpu_cores} CPU CORES AVAILABLE",
+                                 text=f"▶ READY | {self.cpu_cores}/{total_cores} CPU CORES | 1 CORE RESERVED",
                                  font=self.font_status,
                                  fg=COLORS['text_primary'], bg=COLORS['bg_light'],
                                  anchor="w", padx=8, pady=4)
@@ -1512,14 +1586,18 @@ Format Recommendations
                 if output_path.exists():
                     self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
                     return True
-                cmd = [self.maxcso_path, '--threads', str(self.cpu_cores), str(path), str(output_path)]
+                # Use dynamic worker count for maxcso
+                workers = self.check_system_resources()
+                cmd = [self.maxcso_path, '--threads', str(workers), str(path), str(output_path)]
                 format_label = 'CSO'
             elif fmt == 'ZSO':
                 output_path = path.with_suffix('.zso')
                 if output_path.exists():
                     self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
                     return True
-                cmd = [self.maxcso_path, '--ziso', '--threads', str(self.cpu_cores), str(path), str(output_path)]
+                # Use dynamic worker count for maxcso
+                workers = self.check_system_resources()
+                cmd = [self.maxcso_path, '--ziso', '--threads', str(workers), str(path), str(output_path)]
                 format_label = 'ZSO'
             else:
                 self.log(f"  ❌ Unsupported PS2 format: {fmt}")
@@ -1542,6 +1620,10 @@ Format Recommendations
                 # Update totals
                 self.total_original_size += original_size
                 self.total_chd_size += new_size
+
+                # Track completion for crash recovery
+                self.completed_files.add(str(path))
+                self.save_progress(self.source_dir)
 
                 self.log(f"  ✅ Success! Saved {savings:.1f}% space")
                 if original_size >= 1024*1024*1024:
@@ -1636,6 +1718,33 @@ Format Recommendations
         
         return success
     
+    def check_system_resources(self):
+        """Check system resources and return recommended worker count"""
+        if not PSUTIL_AVAILABLE:
+            return self.cpu_cores
+        
+        try:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            mem = psutil.virtual_memory()
+            
+            # If RAM is critically high, reduce workers significantly
+            if mem.percent >= self.ram_threshold_percent:
+                return max(1, self.cpu_cores // 2)
+            
+            # If CPU is critically high, reduce workers
+            if cpu_percent >= self.cpu_threshold_percent:
+                return max(1, self.cpu_cores // 2)
+            
+            # If moderate load, use 3/4 of available cores
+            if mem.percent >= 75 or cpu_percent >= 80:
+                return max(1, int(self.cpu_cores * 0.75))
+            
+            # Normal operation - use all allocated cores
+            return self.cpu_cores
+            
+        except Exception:
+            return self.cpu_cores
+    
     def conversion_thread(self):
         """Run conversion in separate thread with parallel processing"""
         
@@ -1658,12 +1767,25 @@ Format Recommendations
                 self.log("Now scanning for game files in extracted folders...\n")
         
         game_files = self.find_game_files(self.source_dir, self.recursive.get())
+        
+        # Filter out already completed files (crash recovery)
+        original_count = len(game_files)
+        game_files = [f for f in game_files if str(f) not in self.completed_files]
+        skipped_count = original_count - len(game_files)
+        
         total = len(game_files)
         self.total_jobs = total
         self.completed_jobs = 0
         
+        if skipped_count > 0:
+            self.log(f"\n📂 RESUME MODE: Skipping {skipped_count} already completed file(s)")
+        
         if total == 0:
-            self.log("No game files to convert!")
+            if skipped_count > 0:
+                self.log("✅ All files already converted!")
+                self.clear_progress()
+            else:
+                self.log("No game files to convert!")
             self.is_converting = False
             self.master.after(0, self.conversion_complete)
             return
@@ -1674,19 +1796,31 @@ Format Recommendations
         
         self.log("\n" + "="*60)
         self.log("STARTING CONVERSION...")
-        self.log(f"Using {self.cpu_cores} CPU cores for parallel processing")
+        total_cores = multiprocessing.cpu_count()
+        self.log(f"Using {self.cpu_cores} of {total_cores} CPU cores (1 core reserved for system)")
         if self.process_ps2_isos.get():
             self.log(f"PS2 emulator: {self.ps2_emulator} | Output format: {self.ps2_output_format}")
+        if PSUTIL_AVAILABLE:
+            self.log(f"Resource monitoring: Enabled (RAM threshold: {self.ram_threshold_percent}%)")
         self.log("="*60 + "\n")
         
         successful = 0
         failed = 0
         completed = 0
         
-        # Use ThreadPoolExecutor for parallel processing
-        with ThreadPoolExecutor(max_workers=self.cpu_cores) as executor:
+        # Dynamic resource management - adjust workers based on system load
+        self.max_workers = self.check_system_resources()
+        if self.max_workers < self.cpu_cores:
+            self.log(f"⚠️  System load detected - using {self.max_workers} workers (throttled)")
+        
+        # Use ThreadPoolExecutor for parallel processing with dynamic worker adjustment
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # Submit all conversion jobs
             futures = {executor.submit(self.process_single_file, f, i, total): f for i, f in enumerate(game_files, 1)}
+            
+            # Track last resource check time
+            last_resource_check = time.time()
+            resource_check_interval = 5.0  # Check every 5 seconds
             
             # Process results as they complete
             for future in as_completed(futures):
@@ -1694,6 +1828,18 @@ Format Recommendations
                     self.log("\n⛔ Conversion stopped by user")
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
+                
+                # Periodically check system resources and warn if needed
+                current_time = time.time()
+                if current_time - last_resource_check > resource_check_interval:
+                    if PSUTIL_AVAILABLE:
+                        try:
+                            mem = psutil.virtual_memory()
+                            if mem.percent >= self.ram_threshold_percent:
+                                self.log(f"⚠️  WARNING: RAM usage high ({mem.percent:.1f}%) - conversions may slow down")
+                        except Exception:
+                            pass
+                    last_resource_check = current_time
                 
                 try:
                     result = future.result()
@@ -1765,6 +1911,10 @@ Format Recommendations
             
             self.log("="*60)
         
+        # Clear progress file after successful completion
+        if failed == 0 or total == successful:
+            self.clear_progress()
+        
         self.is_converting = False
         self.master.after(0, self.conversion_complete)
     
@@ -1798,6 +1948,10 @@ Format Recommendations
                     "CSO/ZSO output requires maxcso. Set its location in the header section."
                 )
                 return
+        
+        # Initialize new batch session
+        import uuid
+        self.current_batch_id = str(uuid.uuid4())
         
         self.is_converting = True
         # Initialize metrics tracking
@@ -1838,7 +1992,8 @@ Format Recommendations
         self.scan_button.config(state="normal")
         self.stop_button.config(state="disabled")
         self.progress.config(value=0)
-        self.status_label.config(text=f"▶ READY | {self.cpu_cores} CPU CORES AVAILABLE", 
+        total_cores = multiprocessing.cpu_count()
+        self.status_label.config(text=f"▶ READY | {self.cpu_cores}/{total_cores} CPU CORES | 1 CORE RESERVED", 
                                 fg=COLORS['text_primary'])
         self.metrics_running = False
         self.metrics_label.config(text="◆ METRICS: IDLE ◆")
@@ -1892,6 +2047,9 @@ Format Recommendations
         # First, extract disc number if present (to preserve it)
         disc_match = re.search(r'\(Disc\s*\d+\)', name, flags=re.IGNORECASE)
         disc_tag = disc_match.group(0) if disc_match else ""
+        
+        # Remove version numbers (V1.0, V2.00, v1, etc.)
+        name = re.sub(r'\s*\(V[\d.]+\)', '', name, flags=re.IGNORECASE)
         
         # Remove ALL parenthetical content (USA, Europe, Rev 1, v1.0, etc.)
         name = re.sub(r'\s*\([^)]+\)', '', name)
