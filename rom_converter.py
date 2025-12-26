@@ -1198,7 +1198,15 @@ Format Recommendations
                                     bg=COLORS['accent_orange'], fg="white",
                                     activebackground=COLORS['accent_red'],
                                     relief="flat", cursor="hand2", padx=15, pady=5)
-        self.cleanup_button.pack(side="left")
+        self.cleanup_button.pack(side="left", padx=(0, 8))
+        
+        self.clean_names_button = Button(button_frame, text="✨ CLEAN NAMES", 
+                                        command=self.clean_names_dialog,
+                                        font=self.font_button,
+                                        bg=COLORS['accent_pink'], fg="white",
+                                        activebackground=COLORS['accent_purple'],
+                                        relief="flat", cursor="hand2", padx=15, pady=5)
+        self.clean_names_button.pack(side="left")
         
         # Progress bar with retro style
         progress_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
@@ -2531,6 +2539,384 @@ Format Recommendations
                activebackground=COLORS['accent_orange'],
                relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
  
+        Button(action_frame, text="✕ CLOSE", command=dialog.destroy,
+               font=self.font_button,
+               activebackground=COLORS['accent_red'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def clean_names_dialog(self):
+        """Open dialog to clean ROM file names by removing region/revision tags"""
+        dialog = Toplevel(self.master)
+        dialog.title("◄ CLEAN ROM NAMES ►")
+        dialog.geometry("800x600")
+        dialog.resizable(True, True)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+        
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="✨ CLEAN ROM NAMES", font=self.font_heading_md,
+              fg=COLORS['accent_pink'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="Remove region codes, revision tags, and other metadata from filenames",
+              font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
+        
+        # Source directory
+        source_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        source_frame.pack(fill="x")
+        
+        Label(source_frame, text="📂 Source:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left")
+        source_entry = Entry(source_frame, font=self.font_body,
+                            bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                            insertbackground=COLORS['text_primary'], relief="flat")
+        source_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
+        if self.source_dir:
+            source_entry.insert(0, self.source_dir)
+        
+        def browse_source():
+            folder = filedialog.askdirectory(title="Select Source Folder")
+            if folder:
+                source_entry.delete(0, "end")
+                source_entry.insert(0, folder)
+        
+        Button(source_frame, text="[ BROWSE ]", command=browse_source,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left")
+        
+        # Options
+        options_frame = Frame(dialog, padx=10, pady=8, bg=COLORS['bg_light'])
+        options_frame.pack(fill="x", padx=10, pady=5)
+        
+        cb_bg = COLORS['bg_light']
+        
+        recursive_scan = BooleanVar(value=True)
+        Checkbutton(options_frame, text="↳ Scan subdirectories", 
+                   variable=recursive_scan, font=self.font_small,
+                   fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(anchor="w")
+        
+        # Info about what will be removed
+        info_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        info_frame.pack(fill="x")
+        
+        Label(info_frame, text="Will REMOVE: (USA), (Europe), (Japan), (En), (Rev 1), (v1.0), [!], etc.",
+              font=self.font_small, fg=COLORS['accent_red'], bg=COLORS['bg_dark']).pack(anchor="w")
+        Label(info_frame, text="Will KEEP: (Disc 1), (Disc 2), (Bonus Disc), (Demo), (Beta), (Proto), etc.",
+              font=self.font_small, fg=COLORS['button_green'], bg=COLORS['bg_dark']).pack(anchor="w")
+        
+        # Results area
+        results_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        results_frame.pack(fill="both", expand=True)
+        
+        Label(results_frame, text="◄ PREVIEW CHANGES ►", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(0, 4))
+        
+        list_frame = Frame(results_frame, bg=COLORS['bg_dark'])
+        list_frame.pack(fill="both", expand=True)
+        
+        scrollbar = Scrollbar(list_frame, bg=COLORS['bg_light'],
+                             troughcolor=COLORS['bg_dark'])
+        scrollbar.pack(side="right", fill="y")
+        
+        results_text = Text(list_frame, wrap="word", yscrollcommand=scrollbar.set,
+                           height=15, font=self.font_mono,
+                           bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                           insertbackground=COLORS['text_primary'], relief="flat",
+                           padx=8, pady=8)
+        results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=results_text.yview)
+        
+        # Store files to rename
+        files_to_rename = []
+        
+        def get_clean_name(filename):
+            """Clean a ROM filename by removing unwanted tags while preserving important ones."""
+            name = filename
+            
+            # Tags to KEEP (case-insensitive patterns that should be preserved)
+            keep_patterns = [
+                r'\(Disc\s*\d+\)',           # (Disc 1), (Disc 2), etc.
+                r'\(Disk\s*\d+\)',           # (Disk 1), (Disk 2), etc.
+                r'\(Bonus\s*Disc\)',         # (Bonus Disc)
+                r'\(Bonus\s*Disk\)',         # (Bonus Disk)
+                r'\(Custom\s*Install\s*Disc\)', # (Custom Install Disc)
+                r'\(Install\s*Disc\)',       # (Install Disc)
+                r'\(Demo\)',                 # (Demo)
+                r'\(Beta\)',                 # (Beta)
+                r'\(Proto\)',                # (Proto)
+                r'\(Prototype\)',            # (Prototype)
+                r'\(Sample\)',               # (Sample)
+                r'\(Promo\)',                # (Promo)
+                r'\(Kiosk\)',                # (Kiosk)
+                r'\(Limited\s*Edition\)',    # (Limited Edition)
+                r'\(Collector.?s?\s*Edition\)', # (Collector's Edition)
+                r'\(Special\s*Edition\)',    # (Special Edition)
+                r'\(Game\s*of.*Year\)',      # (Game of the Year)
+                r'\(GOTY\)',                 # (GOTY)
+                r'\(Director.?s?\s*Cut\)',   # (Director's Cut)
+                r'\(Uncut\)',                # (Uncut)
+                r'\(Black\s*Label\)',        # (Black Label)
+                r'\(Greatest\s*Hits\)',      # (Greatest Hits)
+                r'\(Platinum\)',             # (Platinum)
+                r'\(Player.?s?\s*Choice\)',  # (Player's Choice)
+                r'\(Nintendo\s*Selects\)',   # (Nintendo Selects)
+                r'\(Budget\)',               # (Budget)
+                r'\(Reprint\)',              # (Reprint)
+                r'\(Alt\)',                  # (Alt) - alternate version
+                r'\(Part\s*\d+\)',           # (Part 1), (Part 2)
+                r'\(Side\s*[AB]\)',          # (Side A), (Side B)
+            ]
+            
+            # Extract tags to keep
+            preserved_tags = []
+            for pattern in keep_patterns:
+                matches = re.findall(pattern, name, re.IGNORECASE)
+                preserved_tags.extend(matches)
+            
+            # Tags to REMOVE (region codes, languages, revisions, etc.)
+            remove_patterns = [
+                r'\(USA\)',
+                r'\(U\)',
+                r'\(America\)',
+                r'\(Europe\)',
+                r'\(E\)',
+                r'\(EU\)',
+                r'\(Japan\)',
+                r'\(J\)',
+                r'\(JP\)',
+                r'\(Korea\)',
+                r'\(K\)',
+                r'\(KR\)',
+                r'\(Asia\)',
+                r'\(A\)',
+                r'\(World\)',
+                r'\(W\)',
+                r'\(Australia\)',
+                r'\(AU\)',
+                r'\(France\)',
+                r'\(F\)',
+                r'\(Fr\)',
+                r'\(Germany\)',
+                r'\(G\)',
+                r'\(De\)',
+                r'\(Spain\)',
+                r'\(S\)',
+                r'\(Es\)',
+                r'\(Italy\)',
+                r'\(I\)',
+                r'\(It\)',
+                r'\(Netherlands\)',
+                r'\(Nl\)',
+                r'\(Sweden\)',
+                r'\(Sw\)',
+                r'\(Sv\)',
+                r'\(Norway\)',
+                r'\(No\)',
+                r'\(Denmark\)',
+                r'\(Dk\)',
+                r'\(Da\)',
+                r'\(Finland\)',
+                r'\(Fi\)',
+                r'\(Portugal\)',
+                r'\(Pt\)',
+                r'\(Brazil\)',
+                r'\(Br\)',
+                r'\(Russia\)',
+                r'\(Ru\)',
+                r'\(China\)',
+                r'\(Cn\)',
+                r'\(Zh\)',
+                r'\(Taiwan\)',
+                r'\(Tw\)',
+                r'\(Hong\s*Kong\)',
+                r'\(HK\)',
+                r'\(En\)',                   # Language: English
+                r'\(En,.*?\)',               # (En,Fr), (En,De,Es), etc.
+                r'\(English\)',
+                r'\(French\)',
+                r'\(German\)',
+                r'\(Spanish\)',
+                r'\(Italian\)',
+                r'\(Japanese\)',
+                r'\(Multi\)',                # Multi-language
+                r'\(Multi\d*\)',             # (Multi5), (Multi6), etc.
+                r'\(M\d+\)',                 # (M3), (M5), etc.
+                r'\(Rev\s*[\dA-Z\.]+\)',    # (Rev 1), (Rev A), (Rev 1.1)
+                r'\(v[\d\.]+[a-z]?\)',      # (v1.0), (v1.1), (v2.0a)
+                r'\(Ver\.?\s*[\d\.]+\)',   # (Ver 1.0), (Ver. 2.0)
+                r'\(Version\s*[\d\.]+\)',  # (Version 1.0)
+                r'\[!\]',                    # Good dump indicator
+                r'\[a\d?\]',                 # Alternate version [a], [a1]
+                r'\[b\d?\]',                 # Bad dump [b], [b1]
+                r'\[c\]',                    # Cracked
+                r'\[f\d?\]',                 # Fixed [f], [f1]
+                r'\[h\d*[A-Za-z]*\]',        # Hack indicators
+                r'\[o\d?\]',                 # Overdump
+                r'\[p\d?\]',                 # Pirate
+                r'\[t\d?\]',                 # Trained/Trainer
+                r'\[T[+-][A-Za-z]+[^\]]*\]', # Translation [T+Eng], [T-Spa]
+                r'\(NTSC\)',
+                r'\(NTSC-U\)',
+                r'\(NTSC-J\)',
+                r'\(PAL\)',
+                r'\(SECAM\)',
+                r'\(\d{4}-\d{2}-\d{2}\)',   # Date stamps (2001-12-25)
+                r'\(\d{8}\)',                # Date stamps (20011225)
+                r'\(Unl\)',                  # Unlicensed
+            ]
+            
+            # Multi-region/multi-language combined patterns (e.g., "(USA, Europe, Asia)")
+            # These need to be handled separately with a more flexible regex
+            region_words = [
+                'USA', 'Europe', 'Japan', 'Asia', 'World', 'Korea', 'Australia',
+                'France', 'Germany', 'Spain', 'Italy', 'Netherlands', 'Sweden',
+                'Norway', 'Denmark', 'Finland', 'Portugal', 'Brazil', 'Russia',
+                'China', 'Taiwan', 'Hong Kong', 'Canada', 'UK', 'America',
+                'En', 'Fr', 'De', 'Es', 'It', 'Ja', 'Ko', 'Zh', 'Pt', 'Ru', 'Nl',
+                'English', 'French', 'German', 'Spanish', 'Italian', 'Japanese',
+                'U', 'E', 'J', 'A', 'K', 'W', 'G', 'F', 'S', 'I',
+                'EU', 'JP', 'KR', 'AU', 'Br', 'Cn', 'Tw', 'HK', 'Dk', 'Fi', 'No', 'Sv', 'Sw'
+            ]
+            # Build a pattern that matches "(Region1, Region2, ...)" with 2+ regions
+            region_pattern = r'\(\s*(?:' + '|'.join(re.escape(r) for r in region_words) + r')(?:\s*,\s*(?:' + '|'.join(re.escape(r) for r in region_words) + r'))+\s*\)'
+            name = re.sub(region_pattern, '', name, flags=re.IGNORECASE)
+            
+            # Remove the unwanted tags
+            for pattern in remove_patterns:
+                name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+            
+            # Also remove any parentheses containing just 2-3 letter codes that weren't caught
+            # but avoid removing preserved tags
+            name = re.sub(r'\s*\([A-Za-z]{1,3}\)(?!\s*\.)', '', name)
+            
+            # Clean up multiple spaces
+            name = re.sub(r'\s+', ' ', name)
+            
+            # Clean up spaces before file extension
+            name = re.sub(r'\s+\.', '.', name)
+            
+            # Clean up leading/trailing spaces
+            name = name.strip()
+            
+            return name
+        
+        def scan_for_cleaning():
+            source = source_entry.get()
+            if not source or not os.path.isdir(source):
+                messagebox.showerror("Error", "Please select a valid source directory")
+                return
+            
+            files_to_rename.clear()
+            results_text.delete("1.0", "end")
+            
+            # Scan for ROM files
+            rom_extensions = {'.chd', '.cue', '.bin', '.iso', '.img', '.cso', '.zso', 
+                             '.gba', '.gbc', '.gb', '.nes', '.snes', '.sfc', '.smc',
+                             '.n64', '.z64', '.v64', '.nds', '.3ds', '.cia',
+                             '.psx', '.pbp', '.gcm', '.gcz', '.rvz', '.wbfs', '.wad',
+                             '.xci', '.nsp', '.xiso'}
+            
+            path = Path(source)
+            if recursive_scan.get():
+                all_files = list(path.rglob("*"))
+            else:
+                all_files = list(path.glob("*"))
+            
+            # Filter to ROM files only
+            rom_files = [f for f in all_files if f.is_file() and f.suffix.lower() in rom_extensions]
+            
+            if not rom_files:
+                results_text.insert("end", "No ROM files found in the selected directory.\n")
+                return
+            
+            results_text.insert("end", f"Found {len(rom_files)} ROM file(s)...\n\n")
+            
+            changes_found = 0
+            for rom_file in sorted(rom_files):
+                original_name = rom_file.name
+                clean_name = get_clean_name(original_name)
+                
+                if clean_name != original_name:
+                    changes_found += 1
+                    files_to_rename.append((rom_file, clean_name))
+                    relative_path = rom_file.parent.relative_to(path) if rom_file.parent != path else Path('.')
+                    results_text.insert("end", f"📁 {relative_path}\n")
+                    results_text.insert("end", f"  ❌ {original_name}\n")
+                    results_text.insert("end", f"  ✅ {clean_name}\n\n")
+            
+            if changes_found == 0:
+                results_text.insert("end", "✨ All file names are already clean! No changes needed.\n")
+            else:
+                results_text.insert("end", f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+                results_text.insert("end", f"Total: {changes_found} file(s) will be renamed.\n")
+            
+            results_text.see("1.0")
+        
+        def execute_rename():
+            if not files_to_rename:
+                messagebox.showwarning("No Changes", "No files to rename. Run SCAN first.")
+                return
+            
+            confirm = messagebox.askyesno(
+                "Confirm Rename",
+                f"This will rename {len(files_to_rename)} file(s).\n\n"
+                "This action cannot be undone!\n\n"
+                "Continue?"
+            )
+            
+            if not confirm:
+                return
+            
+            renamed_count = 0
+            error_count = 0
+            
+            results_text.delete("1.0", "end")
+            results_text.insert("end", "Renaming files...\n\n")
+            
+            for rom_file, new_name in files_to_rename:
+                try:
+                    new_path = rom_file.parent / new_name
+                    
+                    # Check if target already exists
+                    if new_path.exists():
+                        results_text.insert("end", f"⚠️ SKIP (exists): {new_name}\n")
+                        error_count += 1
+                        continue
+                    
+                    rom_file.rename(new_path)
+                    results_text.insert("end", f"✅ {rom_file.name} → {new_name}\n")
+                    renamed_count += 1
+                    
+                except Exception as e:
+                    results_text.insert("end", f"❌ ERROR: {rom_file.name} - {e}\n")
+                    error_count += 1
+            
+            results_text.insert("end", f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+            results_text.insert("end", f"✅ Renamed: {renamed_count}\n")
+            if error_count > 0:
+                results_text.insert("end", f"❌ Errors: {error_count}\n")
+            
+            files_to_rename.clear()
+            messagebox.showinfo("Complete", f"Renamed {renamed_count} file(s).")
+        
+        # Action buttons
+        action_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        action_frame.pack(fill="x")
+        
+        Button(action_frame, text="▶ SCAN", command=scan_for_cleaning,
+               font=self.font_button,
+               bg=COLORS['button_green'], fg=COLORS['bg_dark'],
+               activebackground=COLORS['text_primary'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="✨ RENAME", command=execute_rename,
+               font=self.font_button,
+               bg=COLORS['accent_pink'], fg="white",
+               activebackground=COLORS['accent_purple'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
         Button(action_frame, text="✕ CLOSE", command=dialog.destroy,
                font=self.font_button,
                activebackground=COLORS['accent_red'],
