@@ -1,11 +1,12 @@
 #!/bin/bash
 # Build script for ROM Converter using PyInstaller (Arch Linux)
 #
-# Usage: ./build.sh [--clean] [--download-tools] [--appimage] [--flatpak]
+# Usage: ./build.sh [--clean] [--download-tools] [--onedir] [--appimage] [--flatpak]
 #
 # Options:
 #   --clean           Remove previous build artifacts before building
 #   --download-tools  Download chdman (from MAME) and maxcso before building
+#   --onedir          Build loose files in dist/ROM_Converter/ instead of a single binary
 #   --appimage        Build an AppImage package
 #   --flatpak         Build a Flatpak package
 #
@@ -31,6 +32,7 @@ CLEAN=false
 DOWNLOAD_TOOLS=false
 BUILD_APPIMAGE=false
 BUILD_FLATPAK=false
+BUILD_ONEDIR=false
 for arg in "$@"; do
     case $arg in
         --clean)
@@ -39,6 +41,10 @@ for arg in "$@"; do
             ;;
         --download-tools)
             DOWNLOAD_TOOLS=true
+            shift
+            ;;
+        --onedir)
+            BUILD_ONEDIR=true
             shift
             ;;
         --appimage)
@@ -254,13 +260,17 @@ export PATH="$HOME/.local/bin:$PATH"
 
 # Build command arguments
 BUILD_ARGS=(
-    "--onefile"
     "--name=ROM_Converter"
     "--distpath=dist"
     "--hidden-import=psutil"
     "--runtime-hook=${RUNTIME_HOOK}"
     "rom_converter.py"
 )
+
+# Default to onefile unless onedir explicitly requested
+if [[ "$BUILD_ONEDIR" == false ]]; then
+    BUILD_ARGS=("--onefile" "${BUILD_ARGS[@]}")
+fi
 
 # Check for and include binaries
 echo "Checking for bundled binaries..."
@@ -296,7 +306,11 @@ fi
 
 # Build the executable
 echo
-echo "Building executable..."
+if [[ "$BUILD_ONEDIR" == true ]]; then
+    echo "Building loose onedir bundle (dist/ROM_Converter/)..."
+else
+    echo "Building single-file executable (dist/ROM_Converter)..."
+fi
 python3 -m PyInstaller "${BUILD_ARGS[@]}"
 
 if [[ $? -ne 0 ]]; then
@@ -304,44 +318,70 @@ if [[ $? -ne 0 ]]; then
     exit 1
 fi
 
+APPIMAGE_SOURCE=""
+
 # Verify build
-if [[ -f "dist/ROM_Converter" ]]; then
-    # Make executable
-    chmod +x "dist/ROM_Converter"
-    
-    # Get file size
-    SIZE=$(du -h "dist/ROM_Converter" | cut -f1)
-    
-    echo
-    echo -e "${GREEN}Build successful!${NC}"
-    echo "======================================"
-    echo
-    echo "Output: dist/ROM_Converter"
-    echo "Size: $SIZE"
-    
-    if [[ "$BINARIES_FOUND" == true ]]; then
+if [[ "$BUILD_ONEDIR" == true ]]; then
+    if [[ -d "dist/ROM_Converter" ]]; then
+        BIN_PATH="dist/ROM_Converter/ROM_Converter"
+        [[ -f "$BIN_PATH" ]] && chmod +x "$BIN_PATH"
+        APPIMAGE_SOURCE="$BIN_PATH"
+        # Write a simple launcher script for onedir builds
+        LAUNCHER="dist/ROM_Converter/run_rom_converter.sh"
+        printf '#!/bin/bash\nDIR="$(cd "$(dirname "$0")" && pwd)"\nexec "$DIR/ROM_Converter" "$@"\n' > "$LAUNCHER"
+        chmod +x "$LAUNCHER"
+        SIZE=$(du -sh "dist/ROM_Converter" | cut -f1)
         echo
-        echo -e "${GREEN}Bundled binaries included in executable:${NC}"
-        [[ -f "chdman" ]] && echo -e "  ${GREEN}- chdman${NC}"
-        [[ -f "maxcso" ]] && echo -e "  ${GREEN}- maxcso${NC}"
+        echo -e "${GREEN}Build successful!${NC}"
+        echo "======================================"
         echo
-        echo -e "${GREEN}The executable is fully self-contained!${NC}"
+        echo "Output folder: dist/ROM_Converter/"
+        echo "Size: $SIZE"
+        echo
+        echo "Next Steps:"
+        echo "  1. Run dist/ROM_Converter/ROM_Converter"
+        echo "     or dist/ROM_Converter/run_rom_converter.sh"
+        echo "  2. Distribute the entire dist/ROM_Converter/ folder"
     else
-        echo
-        echo -e "${YELLOW}No binaries bundled - chdman will be downloaded on first run if needed${NC}"
+        echo -e "${RED}Build verification failed - dist/ROM_Converter folder not found${NC}"
+        exit 1
     fi
-    
-    echo
-    echo "Next Steps:"
-    echo "  1. Run dist/ROM_Converter directly"
-    if [[ "$BINARIES_FOUND" == false ]]; then
-        echo "  2. (Optional) Place chdman and maxcso next to ROM_Converter to avoid downloading"
-    fi
-    echo
-    echo "The executable is portable and can be moved anywhere!"
 else
-    echo -e "${RED}Build verification failed - ROM_Converter not found${NC}"
-    exit 1
+    if [[ -f "dist/ROM_Converter" ]]; then
+        chmod +x "dist/ROM_Converter"
+        APPIMAGE_SOURCE="dist/ROM_Converter"
+        SIZE=$(du -h "dist/ROM_Converter" | cut -f1)
+        echo
+        echo -e "${GREEN}Build successful!${NC}"
+        echo "======================================"
+        echo
+        echo "Output: dist/ROM_Converter"
+        echo "Size: $SIZE"
+        
+        if [[ "$BINARIES_FOUND" == true ]]; then
+            echo
+            echo -e "${GREEN}Bundled binaries included in executable:${NC}"
+            [[ -f "chdman" ]] && echo -e "  ${GREEN}- chdman${NC}"
+            [[ -f "maxcso" ]] && echo -e "  ${GREEN}- maxcso${NC}"
+            echo
+            echo -e "${GREEN}The executable is fully self-contained!${NC}"
+        else
+            echo
+            echo -e "${YELLOW}No binaries bundled - chdman will be downloaded on first run if needed${NC}"
+        fi
+        
+        echo
+        echo "Next Steps:"
+        echo "  1. Run dist/ROM_Converter directly"
+        if [[ "$BINARIES_FOUND" == false ]]; then
+            echo "  2. (Optional) Place chdman and maxcso next to ROM_Converter to avoid downloading"
+        fi
+        echo
+        echo "The executable is portable and can be moved anywhere!"
+    else
+        echo -e "${RED}Build verification failed - ROM_Converter not found${NC}"
+        exit 1
+    fi
 fi
 
 # Clean up build-time hook
@@ -375,6 +415,13 @@ if [[ "$BUILD_APPIMAGE" == true ]]; then
         APPIMAGETOOL="./appimagetool-x86_64.AppImage"
     fi
     
+    # Require a built binary path
+    if [[ -z "$APPIMAGE_SOURCE" || ! -f "$APPIMAGE_SOURCE" ]]; then
+        echo -e "${RED}Cannot build AppImage: built binary not found${NC}"
+        echo "Make sure the build step succeeded before requesting --appimage"
+        exit 1
+    fi
+
     # Create AppDir structure
     APPDIR="dist/ROM_Converter.AppDir"
     rm -rf "$APPDIR"
@@ -383,7 +430,7 @@ if [[ "$BUILD_APPIMAGE" == true ]]; then
     mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
     
     # Copy executable
-    cp dist/ROM_Converter "$APPDIR/usr/bin/"
+    cp "$APPIMAGE_SOURCE" "$APPDIR/usr/bin/"
     
     # Create desktop file
     cat > "$APPDIR/usr/share/applications/rom-converter.desktop" << EOF
