@@ -2661,7 +2661,7 @@ obtained ROM files.
                                  relief="flat", cursor="hand2", padx=15, pady=5)
         self.scan_button.pack(side="left", padx=(0, 8))
         
-        self.convert_button = Button(button_frame, text="⚡ CONVERT", 
+        self.convert_button = Button(button_frame, text="Convert", 
                                     command=self.start_conversion,
                                     font=self.font_button,
                                     bg=COLORS['button_blue'], fg="white",
