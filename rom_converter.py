@@ -13,6 +13,9 @@ import zipfile
 import tarfile
 import urllib.request
 import urllib.error
+from tkinter import simpledialog
+import xml.etree.ElementTree as ET
+import gzip
 from pathlib import Path
 from tkinter import Tk, Frame, Label, Button, Entry, Text, Scrollbar, Checkbutton, BooleanVar, filedialog, messagebox, Toplevel
 from tkinter import ttk
@@ -34,8 +37,74 @@ except ImportError:
 MAME_RELEASE_URL = "https://www.mamedev.org/release.html"
 MAME_GITHUB_RELEASES_API = "https://api.github.com/repos/mamedev/mame/releases/latest"
 
+# NDecrypt download configuration (for 3DS ROM decryption)
+NDECRYPT_GITHUB_RELEASES_API = "https://api.github.com/repos/SabreTools/NDecrypt/releases/latest"
+
 # Supported compressed file extensions
 COMPRESSED_EXTENSIONS = {'.zip', '.7z', '.rar', '.gz', '.tar', '.tar.gz', '.tgz'}
+
+# ROM extension to system mapping for archive scanning
+SYSTEM_EXTENSIONS = {
+    # Sony PlayStation
+    '.cue': 'PlayStation',
+    '.bin': 'PlayStation',  # Could be PS1/PS2, will be refined by context
+    '.iso': 'PlayStation 2',
+    '.img': 'PlayStation 2',
+    '.chd': 'PlayStation',
+    '.psx': 'PlayStation',
+    '.pbp': 'PSP',
+    '.cso': 'PSP',
+    '.zso': 'PSP',
+    # Nintendo Handhelds
+    '.gb': 'Game Boy',
+    '.gbc': 'Game Boy Color',
+    '.gba': 'Game Boy Advance',
+    '.sgb': 'Super Game Boy',
+    '.nds': 'Nintendo DS',
+    '.3ds': 'Nintendo 3DS',
+    '.cia': 'Nintendo 3DS',
+    # Nintendo Home Consoles
+    '.nes': 'NES',
+    '.snes': 'SNES',
+    '.sfc': 'SNES',
+    '.smc': 'SNES',
+    '.n64': 'Nintendo 64',
+    '.z64': 'Nintendo 64',
+    '.v64': 'Nintendo 64',
+    '.gcm': 'GameCube',
+    '.gcz': 'GameCube',
+    '.rvz': 'GameCube/Wii',
+    '.wbfs': 'Wii',
+    '.wad': 'Wii',
+    # Nintendo Switch
+    '.xci': 'Nintendo Switch',
+    '.nsp': 'Nintendo Switch',
+    # Xbox
+    '.xiso': 'Xbox',
+    # Sega
+    '.md': 'Sega Genesis',
+    '.gen': 'Sega Genesis',
+    '.smd': 'Sega Genesis',
+    '.32x': 'Sega 32X',
+    '.sms': 'Sega Master System',
+    '.gg': 'Sega Game Gear',
+    '.cdi': 'Dreamcast',
+    '.gdi': 'Dreamcast',
+    # Atari
+    '.a26': 'Atari 2600',
+    '.a78': 'Atari 7800',
+    '.lnx': 'Atari Lynx',
+    # Other
+    '.pce': 'PC Engine',
+    '.ngp': 'Neo Geo Pocket',
+    '.ngc': 'Neo Geo Pocket Color',
+    '.ws': 'WonderSwan',
+    '.wsc': 'WonderSwan Color',
+    '.vb': 'Virtual Boy',
+}
+
+PSP_ID_PATTERNS = ('ulus', 'ules', 'uljm', 'uljs', 'ucus', 'uces', 'uckr', 'ulks')
+PS2_ID_PATTERNS = ('slus', 'sles', 'scus', 'sces', 'slpm', 'slps', 'scps')
 
 # Supported PS2 output formats
 PS2_OUTPUT_FORMATS = ['CHD', 'CSO', 'ZSO']
@@ -51,56 +120,56 @@ PS2_EMULATOR_RECOMMENDATIONS = {
 # Theme presets for different PlayStation eras
 THEME_PRESETS = {
     'PS1': {
-        'bg_dark': '#0d0d11', 'bg_medium': '#151520', 'bg_light': '#1f1f2b', 'bg_input': '#191927',
-        'text_primary': '#f5f5f5', 'text_secondary': '#9ad0ff', 'text_muted': '#707788',
+        'bg_dark': '#0e0e15', 'bg_medium': '#161728', 'bg_light': '#212236', 'bg_input': '#1b1c2e',
+        'text_primary': '#f7f9ff', 'text_secondary': '#b5deff', 'text_muted': '#9aa4b8',
         'accent_pink': '#ff65a3', 'accent_purple': '#c792ea', 'accent_yellow': '#ffd166',
         'accent_orange': '#ff9f1c', 'accent_red': '#ff5c8d', 'button_green': '#6ce37e',
         'button_blue': '#6fa8ff', 'scanline': '#ffffff08',
         'font_body': 'Courier New', 'font_heading': 'Courier New', 'font_mono': 'Courier New'
     },
     'PS2': {
-        'bg_dark': '#0a0a12', 'bg_medium': '#12121a', 'bg_light': '#1a1a2e', 'bg_input': '#16213e',
-        'text_primary': '#00ff88', 'text_secondary': '#00ccff', 'text_muted': '#5c6b7a',
+        'bg_dark': '#0a0b14', 'bg_medium': '#131526', 'bg_light': '#1c1f33', 'bg_input': '#16243a',
+        'text_primary': '#d9ffe8', 'text_secondary': '#9ae6ff', 'text_muted': '#7fa4b5',
         'accent_pink': '#ff00aa', 'accent_purple': '#9945ff', 'accent_yellow': '#ffdd00',
         'accent_orange': '#ff6b35', 'accent_red': '#ff3366', 'button_green': '#00cc66',
         'button_blue': '#0088ff', 'scanline': '#ffffff08',
         'font_body': 'Consolas', 'font_heading': 'Consolas', 'font_mono': 'Consolas'
     },
     'PS3': {
-        'bg_dark': '#0b0b0f', 'bg_medium': '#14141c', 'bg_light': '#1d1d26', 'bg_input': '#181823',
-        'text_primary': '#e8ecf1', 'text_secondary': '#6fc3ff', 'text_muted': '#7d8799',
+        'bg_dark': '#0c0d14', 'bg_medium': '#161826', 'bg_light': '#1f2132', 'bg_input': '#1a1d2b',
+        'text_primary': '#eef2ff', 'text_secondary': '#83ceff', 'text_muted': '#96a0b3',
         'accent_pink': '#ff6fa1', 'accent_purple': '#8c7bff', 'accent_yellow': '#ffd479',
         'accent_orange': '#ff8f5a', 'accent_red': '#ff5f6d', 'button_green': '#4ade80',
         'button_blue': '#3ea7ff', 'scanline': '#ffffff08',
         'font_body': 'Segoe UI', 'font_heading': 'Segoe UI Semibold', 'font_mono': 'Consolas'
     },
     'PS4': {
-        'bg_dark': '#0b132b', 'bg_medium': '#1c2541', 'bg_light': '#243b55', 'bg_input': '#1a233b',
-        'text_primary': '#f2f7ff', 'text_secondary': '#89c2ff', 'text_muted': '#7a8699',
+        'bg_dark': '#101937', 'bg_medium': '#1d2744', 'bg_light': '#283758', 'bg_input': '#202d4a',
+        'text_primary': '#f7fbff', 'text_secondary': '#9ecbff', 'text_muted': '#8a97ad',
         'accent_pink': '#ff7bba', 'accent_purple': '#8d7bff', 'accent_yellow': '#ffd166',
         'accent_orange': '#f8961e', 'accent_red': '#ef476f', 'button_green': '#5be7a9',
         'button_blue': '#3a86ff', 'scanline': '#ffffff08',
         'font_body': 'Segoe UI', 'font_heading': 'Segoe UI Semibold', 'font_mono': 'Consolas'
     },
     'PS5': {
-        'bg_dark': '#0f1419', 'bg_medium': '#1a1f2e', 'bg_light': '#252d3d', 'bg_input': '#1f2735',
-        'text_primary': '#e8ecf1', 'text_secondary': '#60a5fa', 'text_muted': '#6b7280',
+        'bg_dark': '#111827', 'bg_medium': '#1a2233', 'bg_light': '#242f43', 'bg_input': '#1e2738',
+        'text_primary': '#f1f5ff', 'text_secondary': '#88b7ff', 'text_muted': '#8b94a6',
         'accent_pink': '#ec4899', 'accent_purple': '#a855f7', 'accent_yellow': '#fbbf24',
         'accent_orange': '#f97316', 'accent_red': '#ef4444', 'button_green': '#10b981',
         'button_blue': '#3b82f6', 'scanline': '#ffffff08',
         'font_body': 'Segoe UI', 'font_heading': 'Segoe UI Semibold', 'font_mono': 'Consolas'
     },
     'PSP': {
-        'bg_dark': '#0d0f14', 'bg_medium': '#161922', 'bg_light': '#1f2430', 'bg_input': '#191e29',
-        'text_primary': '#f0f4ff', 'text_secondary': '#5dd4ff', 'text_muted': '#7e8899',
+        'bg_dark': '#0e1119', 'bg_medium': '#181c28', 'bg_light': '#222837', 'bg_input': '#1c2232',
+        'text_primary': '#f7fbff', 'text_secondary': '#7fe0ff', 'text_muted': '#93a0b3',
         'accent_pink': '#ff6fb7', 'accent_purple': '#9d7bff', 'accent_yellow': '#ffd166',
         'accent_orange': '#ff9f1c', 'accent_red': '#ff5f6d', 'button_green': '#4ade80',
         'button_blue': '#4aa3ff', 'scanline': '#ffffff08',
         'font_body': 'Tahoma', 'font_heading': 'Tahoma', 'font_mono': 'Consolas'
     },
     'PSVita': {
-        'bg_dark': '#0b1024', 'bg_medium': '#131b33', 'bg_light': '#1c2540', 'bg_input': '#16203a',
-        'text_primary': '#eef3ff', 'text_secondary': '#7cd2ff', 'text_muted': '#7c89a3',
+        'bg_dark': '#0d1230', 'bg_medium': '#151c3f', 'bg_light': '#1e2850', 'bg_input': '#182342',
+        'text_primary': '#f5f8ff', 'text_secondary': '#9ad5ff', 'text_muted': '#93a1b8',
         'accent_pink': '#ff7ba5', 'accent_purple': '#8b7bff', 'accent_yellow': '#ffd479',
         'accent_orange': '#ff9e5a', 'accent_red': '#ff6b81', 'button_green': '#5de0a4',
         'button_blue': '#4d9dff', 'scanline': '#ffffff08',
@@ -120,14 +189,23 @@ class ROMConverter:
         master.resizable(True, True)
         master.configure(bg=COLORS['bg_dark'])
         
-        # Maximize window on startup
-        master.state('zoomed')
+        # Maximize window on startup (cross-platform)
+        try:
+            master.state('zoomed')  # Windows
+        except:
+            master.attributes('-zoomed', True)  # Linux
         
         # Config file location (portable: lives beside the app)
         # Handle PyInstaller's temporary folder for bundled resources
         if getattr(sys, 'frozen', False):
             # Running as compiled executable
-            self.script_dir = Path(sys.executable).parent.resolve()
+            # Check if running from AppImage (read-only mount)
+            appimage_path = os.environ.get('APPIMAGE')
+            if appimage_path:
+                # AppImage: use directory containing the .AppImage file
+                self.script_dir = Path(appimage_path).parent.resolve()
+            else:
+                self.script_dir = Path(sys.executable).parent.resolve()
             # PyInstaller extracts bundled files to sys._MEIPASS
             self.bundle_dir = Path(getattr(sys, '_MEIPASS', self.script_dir))
         else:
@@ -135,7 +213,17 @@ class ROMConverter:
             self.script_dir = Path(__file__).parent.resolve()
             self.bundle_dir = self.script_dir
         
-        self.config_file = self.script_dir / ".rom_converter_config.json"
+        self.config_candidates = [
+            self.script_dir / ".rom_converter_config.json",
+            Path.home() / ".rom_converter_config.json"
+        ]
+        self.config_file = next((p for p in self.config_candidates if p.exists()), self.config_candidates[0])
+        self.metadata_dir = self.script_dir / "metadata_cache"
+        self.metadata_sources = {
+            'PlayStation 2': "https://archive.org/download/redump_ps2/redump_ps2.dat",
+            'PSP': "https://archive.org/download/redump_psp/redump_psp.dat"
+        }
+        self.metadata_index = {}  # lower filename -> {'system': ..., 'size': int, 'title': ...}
         
         # Variables
         self.source_dir = ""
@@ -155,13 +243,24 @@ class ROMConverter:
         self.process_ps1_cues = BooleanVar(value=False)  # Toggle for PS1 CUE processing
         self.process_ps2_cues = BooleanVar(value=False)  # Toggle for PS2 BIN/CUE processing (CD-based games)
         self.process_ps2_isos = BooleanVar(value=False)  # Toggle for PS2 ISO processing
+        self.process_psp_isos = BooleanVar(value=False)  # Toggle for PSP ISO processing
         self.extract_compressed = BooleanVar(value=True)  # Toggle for extracting compressed files
         self.delete_archives_after_extract = BooleanVar(value=False)  # Delete archives after extraction
         self.seven_zip_path = None  # Path to 7z executable for .7z and .rar files
         self.maxcso_path = None  # Path to maxcso executable for CSO/ZSO
+        self.ndecrypt_path = None  # Path to NDecrypt executable for 3DS decryption
         self.ps2_output_format = 'CHD'  # Default PS2 output format
+        self.psp_output_format = 'CSO'  # Default PSP output format
         self.ps2_emulator = 'PCSX2'  # Default emulator preference
         self.current_theme = 'PS2'  # Default UI theme
+        self.system_extract_dirs = {}  # Persistent mapping of system -> extraction directory
+        # 3DS workflow settings
+        self.threeds_backup_original = True
+        self.threeds_delete_archives = False
+        self.threeds_delete_after_move = False
+        self.threeds_auto_clean_names = True
+        self.threeds_source_dir = ""
+        self.threeds_dest_dir = ""
         self.font_body_family = None
         self.font_heading_family = None
         self.font_mono_family = None
@@ -176,6 +275,7 @@ class ROMConverter:
         self.metrics_running = False
         self.metrics_lock = pythread.Lock()
         self.chdman_path = None  # Will store path to chdman executable
+        self.build_timestamp = self.get_build_timestamp()
         
         # Progress tracking for crash recovery
         self.progress_file = self.script_dir / ".rom_converter_progress.json"
@@ -228,17 +328,39 @@ class ROMConverter:
             self.check_for_chdman_update()
         
         self.setup_ui()
+
+    def get_build_timestamp(self):
+        """Return build timestamp for About dialog."""
+        env_ts = os.environ.get("BUILD_TIMESTAMP")
+        if env_ts:
+            cleaned = env_ts.strip()
+            if cleaned.isdigit():
+                try:
+                    ts = int(cleaned)
+                    return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(ts))
+                except Exception:
+                    return cleaned
+            return cleaned
+        try:
+            target_path = Path(sys.executable if getattr(sys, "frozen", False) else __file__)
+            mtime = target_path.stat().st_mtime
+            return time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(mtime))
+        except Exception:
+            return "Unknown"
     
     def check_chdman(self):
         """Check if chdman is available"""
+        # Determine platform-specific binary name
+        chdman_name = "chdman.exe" if sys.platform == "win32" else "chdman"
+        
         # First check bundled resources (PyInstaller)
-        bundled_chdman = self.bundle_dir / "chdman.exe"
+        bundled_chdman = self.bundle_dir / chdman_name
         if bundled_chdman.exists():
             self.chdman_path = str(bundled_chdman)
             return True
         
-        # Then check for chdman.exe directly next to the executable/script
-        direct_chdman = self.script_dir / "chdman.exe"
+        # Then check for chdman directly next to the executable/script
+        direct_chdman = self.script_dir / chdman_name
         if direct_chdman.exists():
             self.chdman_path = str(direct_chdman)
             return True
@@ -334,8 +456,13 @@ class ROMConverter:
         return None
     
     def download_mame_tools(self):
-        """Download and extract MAME tools from mamedev.org"""
+        """Download and extract MAME tools"""
         try:
+            # On Linux, use a different approach - download prebuilt or guide user
+            if sys.platform != "win32":
+                return self.download_mame_tools_linux()
+            
+            # Windows: Download from MAME releases
             # Get latest version
             version = self.get_latest_mame_version()
             if not version:
@@ -491,6 +618,114 @@ class ROMConverter:
             messagebox.showerror("Error", f"Failed to download MAME tools:\n{e}")
             return False
     
+    def download_mame_tools_linux(self):
+        """Download chdman for Linux systems (SteamOS, etc.)"""
+        try:
+            # Try to download prebuilt chdman from a reliable source
+            # Using mame-tools from various Linux package mirrors or building from source
+            
+            temp_dir = self.script_dir / "mame_temp"
+            temp_dir.mkdir(exist_ok=True)
+            
+            script_dir = self.script_dir
+            chdman_dest = script_dir / "chdman"
+            
+            # Show progress dialog
+            progress_window = Toplevel()
+            progress_window.title("Downloading chdman")
+            progress_window.geometry("450x180")
+            progress_window.resizable(False, False)
+            progress_window.transient()
+            progress_window.grab_set()
+            
+            Label(progress_window, text="Downloading chdman for Linux...", 
+                  font=("Arial", 10)).pack(pady=10)
+            
+            progress_bar = ttk.Progressbar(progress_window, mode='indeterminate', length=350)
+            progress_bar.pack(pady=10)
+            progress_bar.start(10)
+            
+            status_label = Label(progress_window, text="Connecting...", wraplength=400)
+            status_label.pack(pady=5)
+            
+            progress_window.update()
+            
+            # Try multiple sources for prebuilt chdman
+            download_sources = [
+                # EmuDeck's prebuilt chdman for Steam Deck
+                ("https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/tools/chdconv/chdman", "direct"),
+                # Arch Linux package extraction (mame-tools)
+                ("https://archive.archlinux.org/packages/m/mame-tools/", "arch"),
+            ]
+            
+            downloaded = False
+            
+            for source_url, source_type in download_sources:
+                try:
+                    status_label.config(text=f"Trying: {source_type}...")
+                    progress_window.update()
+                    
+                    if source_type == "direct":
+                        # Direct binary download
+                        req = urllib.request.Request(
+                            source_url,
+                            headers={'User-Agent': 'Mozilla/5.0 ROM Converter'}
+                        )
+                        
+                        with urllib.request.urlopen(req, timeout=60) as response:
+                            with open(chdman_dest, 'wb') as f:
+                                f.write(response.read())
+                        
+                        # Make executable
+                        os.chmod(chdman_dest, 0o755)
+                        
+                        # Verify it works
+                        result = subprocess.run([str(chdman_dest), '--help'], 
+                                              capture_output=True, timeout=5)
+                        if result.returncode == 0 or b'chdman' in result.stdout or b'chdman' in result.stderr:
+                            downloaded = True
+                            break
+                        else:
+                            chdman_dest.unlink(missing_ok=True)
+                            
+                except Exception as e:
+                    print(f"Download from {source_type} failed: {e}")
+                    continue
+            
+            progress_window.destroy()
+            
+            # Clean up temp directory
+            if temp_dir.exists():
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+            
+            if downloaded and chdman_dest.exists():
+                self.chdman_path = str(chdman_dest)
+                self.save_config()
+                messagebox.showinfo("Success", f"chdman downloaded successfully!\n\nLocation:\n{self.chdman_path}")
+                return True
+            else:
+                # Provide helpful instructions for SteamOS/Linux
+                messagebox.showwarning(
+                    "Manual Installation Required",
+                    "Could not download chdman automatically.\n\n"
+                    "For SteamOS/Steam Deck:\n"
+                    "1. Install EmuDeck (includes chdman), or\n"
+                    "2. Open Konsole and run:\n"
+                    "   flatpak install flathub org.mamedev.MAME\n\n"
+                    "For other Linux:\n"
+                    "   sudo pacman -S mame-tools  (Arch)\n"
+                    "   sudo apt install mame-tools  (Debian/Ubuntu)\n\n"
+                    "Then place 'chdman' next to this application."
+                )
+                return False
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to download MAME tools:\n{e}")
+            return False
+    
     def check_7zip(self):
         """Check if 7-Zip is available"""
         # Check common locations on Windows
@@ -515,14 +750,17 @@ class ROMConverter:
 
     def check_maxcso(self):
         """Check if maxcso is available for CSO/ZSO output"""
+        # Determine platform-specific binary name
+        maxcso_name = "maxcso.exe" if sys.platform == "win32" else "maxcso"
+        
         # First check bundled resources (PyInstaller)
-        bundled_maxcso = self.bundle_dir / "maxcso.exe"
+        bundled_maxcso = self.bundle_dir / maxcso_name
         if bundled_maxcso.exists():
             self.maxcso_path = str(bundled_maxcso)
             return True
         
-        # Then check for maxcso.exe directly next to the executable/script
-        direct_maxcso = self.script_dir / "maxcso.exe"
+        # Then check for maxcso directly next to the executable/script
+        direct_maxcso = self.script_dir / maxcso_name
         if direct_maxcso.exists():
             self.maxcso_path = str(direct_maxcso)
             return True
@@ -708,6 +946,1094 @@ Format Recommendations
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to verify chdman:\n{e}")
     
+    def browse_ndecrypt(self):
+        """Allow user to manually select NDecrypt executable"""
+        filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
+        ndecrypt_file = filedialog.askopenfilename(
+            title="Select NDecrypt executable",
+            filetypes=filetypes
+        )
+        if ndecrypt_file:
+            try:
+                result = subprocess.run(
+                    [ndecrypt_file, "--help"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                output = (result.stdout + result.stderr).lower()
+                if "ndecrypt" in output or "decrypt" in output:
+                    self.ndecrypt_path = ndecrypt_file
+                    self.save_config()
+                    self.log(f"NDecrypt location set to: {ndecrypt_file}")
+                    if hasattr(self, 'ndecrypt_label'):
+                        self.ndecrypt_label.config(text=self.ndecrypt_path,
+                                                  fg=COLORS['text_secondary'])
+                    messagebox.showinfo("Success", f"NDecrypt location set to:\n{ndecrypt_file}")
+                else:
+                    messagebox.showerror("Error", "Selected file does not appear to be NDecrypt")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to verify NDecrypt:\n{e}")
+    
+    def download_ndecrypt(self):
+        """Download NDecrypt from GitHub releases"""
+        try:
+            # Determine platform
+            if sys.platform == "win32":
+                asset_pattern = "win-x64"
+            elif sys.platform == "darwin":
+                import platform
+                if platform.machine() == "arm64":
+                    asset_pattern = "osx-arm64"
+                else:
+                    asset_pattern = "osx-x64"
+            else:  # Linux
+                import platform
+                if platform.machine() == "aarch64":
+                    asset_pattern = "linux-arm64"
+                else:
+                    asset_pattern = "linux-x64"
+            
+            self.log("Fetching NDecrypt release info from GitHub...")
+            
+            # Get latest release info
+            req = urllib.request.Request(
+                NDECRYPT_GITHUB_RELEASES_API,
+                headers={'User-Agent': 'ROM-Converter'}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                release_data = json.loads(response.read().decode())
+            
+            # Find matching asset
+            download_url = None
+            asset_name = None
+            for asset in release_data.get('assets', []):
+                name = asset.get('name', '')
+                if asset_pattern in name and name.endswith('.zip'):
+                    download_url = asset.get('browser_download_url')
+                    asset_name = name
+                    break
+            
+            if not download_url:
+                messagebox.showerror("Error", 
+                    f"Could not find NDecrypt release for your platform ({asset_pattern}).\n\n"
+                    "Please download manually from:\nhttps://github.com/SabreTools/NDecrypt/releases")
+                return
+            
+            self.log(f"Downloading {asset_name}...")
+            
+            # Download the zip
+            zip_path = self.script_dir / asset_name
+            urllib.request.urlretrieve(download_url, zip_path)
+            
+            # Extract
+            self.log("Extracting NDecrypt...")
+            extract_dir = self.script_dir / "ndecrypt"
+            extract_dir.mkdir(exist_ok=True)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(extract_dir)
+            
+            # Find the executable
+            if sys.platform == "win32":
+                ndecrypt_exe = extract_dir / "NDecrypt.exe"
+            else:
+                ndecrypt_exe = extract_dir / "NDecrypt"
+                # Make executable on Linux/Mac
+                if ndecrypt_exe.exists():
+                    os.chmod(ndecrypt_exe, 0o755)
+            
+            if ndecrypt_exe.exists():
+                self.ndecrypt_path = str(ndecrypt_exe)
+                self.save_config()
+                self.log(f"✅ NDecrypt installed to: {self.ndecrypt_path}")
+                if hasattr(self, 'ndecrypt_label'):
+                    self.ndecrypt_label.config(text=self.ndecrypt_path,
+                                              fg=COLORS['text_secondary'])
+                messagebox.showinfo("Success", 
+                    f"NDecrypt downloaded and installed!\n\n{self.ndecrypt_path}\n\n"
+                    "Note: You'll need a config.json with encryption keys for decryption to work.")
+            else:
+                messagebox.showerror("Error", "Could not find NDecrypt executable after extraction")
+            
+            # Cleanup zip
+            try:
+                zip_path.unlink()
+            except:
+                pass
+                
+        except Exception as e:
+            self.log(f"❌ Failed to download NDecrypt: {e}")
+            messagebox.showerror("Error", 
+                f"Failed to download NDecrypt:\n{e}\n\n"
+                "Please download manually from:\nhttps://github.com/SabreTools/NDecrypt/releases")
+    
+    def find_aes_keys_file(self):
+        """Find the bundled or local 3DS AES Keys file"""
+        possible_locations = [
+            self.bundle_dir / "3DS AES Keys.txt",
+            self.script_dir / "3DS AES Keys.txt",
+            Path("3DS AES Keys.txt"),
+        ]
+        for loc in possible_locations:
+            if loc.exists():
+                return loc
+        return None
+    
+    def convert_aes_keys_to_config(self, aes_keys_path, output_path):
+        """Convert aes_keys.txt format to NDecrypt config.json format"""
+        try:
+            keys = {}
+            with open(aes_keys_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if '=' in line and not line.startswith('#'):
+                        key, value = line.split('=', 1)
+                        keys[key.strip()] = value.strip()
+            
+            # Map aes_keys.txt format to NDecrypt config.json format
+            config = {}
+            
+            # Generator -> AESHardwareConstant
+            if 'generator' in keys:
+                config['AESHardwareConstant'] = keys['generator']
+            
+            # Map KeyX slots
+            key_mapping = {
+                'slot0x18KeyX': 'KeyX0x18',
+                'slot0x1BKeyX': 'KeyX0x1B',
+                'slot0x25KeyX': 'KeyX0x25',
+                'slot0x2CKeyX': 'KeyX0x2C',
+                'slot0x2DKeyX': 'KeyX0x2D',
+                'slot0x2EKeyX': 'KeyX0x2E',
+                'slot0x2FKeyX': 'KeyX0x2F',
+                'slot0x30KeyX': 'KeyX0x30',
+                'slot0x31KeyX': 'KeyX0x31',
+                'slot0x32KeyX': 'KeyX0x32',
+                'slot0x33KeyX': 'KeyX0x33',
+                'slot0x34KeyX': 'KeyX0x34',
+                'slot0x35KeyX': 'KeyX0x35',
+                'slot0x36KeyX': 'KeyX0x36',
+                'slot0x37KeyX': 'KeyX0x37',
+                'slot0x38KeyX': 'KeyX0x38',
+                'slot0x39KeyX': 'KeyX0x39',
+                'slot0x3AKeyX': 'KeyX0x3A',
+                'slot0x3BKeyX': 'KeyX0x3B',
+                'slot0x3CKeyX': 'KeyX0x3C',
+                'slot0x3DKeyX': 'KeyX0x3D',
+                'slot0x3EKeyX': 'KeyX0x3E',
+                'slot0x3FKeyX': 'KeyX0x3F',
+                'slot0x03KeyX': 'KeyX0x03',
+                'slot0x19KeyX': 'KeyX0x19',
+                'slot0x1AKeyX': 'KeyX0x1A',
+                'slot0x1CKeyX': 'KeyX0x1C',
+                'slot0x1DKeyX': 'KeyX0x1D',
+                'slot0x1EKeyX': 'KeyX0x1E',
+                'slot0x1FKeyX': 'KeyX0x1F',
+            }
+            
+            for aes_key, config_key in key_mapping.items():
+                if aes_key in keys:
+                    config[config_key] = keys[aes_key]
+            
+            # Map KeyY slots if present
+            keyy_mapping = {
+                'slot0x18KeyY': 'KeyY0x18',
+                'slot0x1BKeyY': 'KeyY0x1B',
+                'slot0x25KeyY': 'KeyY0x25',
+                'slot0x2CKeyY': 'KeyY0x2C',
+            }
+            
+            for aes_key, config_key in keyy_mapping.items():
+                if aes_key in keys:
+                    config[config_key] = keys[aes_key]
+            
+            # Map KeyN (normal keys) if present
+            keyn_mapping = {
+                'slot0x18KeyN': 'KeyN0x18',
+                'slot0x1BKeyN': 'KeyN0x1B',
+                'slot0x25KeyN': 'KeyN0x25',
+                'slot0x2CKeyN': 'KeyN0x2C',
+            }
+            
+            for aes_key, config_key in keyn_mapping.items():
+                if aes_key in keys:
+                    config[config_key] = keys[aes_key]
+            
+            # Write config.json
+            with open(output_path, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            return True
+        except Exception as e:
+            self.log(f"❌ Failed to convert AES keys: {e}")
+            return False
+    
+    def setup_ndecrypt_keys(self):
+        """Setup NDecrypt with bundled AES keys if available"""
+        if not self.ndecrypt_path:
+            return False
+        
+        ndecrypt_dir = Path(self.ndecrypt_path).parent
+        config_path = ndecrypt_dir / "config.json"
+        
+        # Check if config.json already exists
+        if config_path.exists():
+            return True
+        
+        # Try to find and convert bundled AES keys
+        aes_keys_path = self.find_aes_keys_file()
+        if aes_keys_path:
+            self.log(f"📋 Found AES keys at: {aes_keys_path}")
+            self.log("🔄 Converting to NDecrypt config.json format...")
+            if self.convert_aes_keys_to_config(aes_keys_path, config_path):
+                self.log(f"✅ Created config.json at: {config_path}")
+                return True
+        
+        return False
+    
+    def clean_rom_filename(self, filename):
+        """Clean a ROM filename by removing unwanted tags while preserving important ones."""
+        name = filename
+        
+        # Tags to KEEP (case-insensitive patterns that should be preserved)
+        keep_patterns = [
+            r'\(Disc\s*\d+\)', r'\(Disk\s*\d+\)', r'\(Bonus\s*Disc\)', r'\(Bonus\s*Disk\)',
+            r'\(Demo\)', r'\(Beta\)', r'\(Proto\)', r'\(Prototype\)', r'\(Sample\)',
+            r'\(Limited\s*Edition\)', r'\(Collector.?s?\s*Edition\)', r'\(Special\s*Edition\)',
+            r'\(Game\s*of.*Year\)', r'\(GOTY\)', r'\(Director.?s?\s*Cut\)', r'\(Uncut\)',
+            r'\(Part\s*\d+\)', r'\(Side\s*[AB]\)',
+        ]
+        
+        # Extract tags to keep
+        preserved_tags = []
+        for pattern in keep_patterns:
+            matches = re.findall(pattern, name, re.IGNORECASE)
+            preserved_tags.extend(matches)
+        
+        # Tags to REMOVE
+        remove_patterns = [
+            r'\(USA\)', r'\(U\)', r'\(America\)', r'\(Europe\)', r'\(E\)', r'\(EU\)',
+            r'\(Japan\)', r'\(J\)', r'\(JP\)', r'\(Korea\)', r'\(K\)', r'\(KR\)',
+            r'\(Asia\)', r'\(A\)', r'\(World\)', r'\(W\)', r'\(Australia\)', r'\(AU\)',
+            r'\(France\)', r'\(F\)', r'\(Fr\)', r'\(Germany\)', r'\(G\)', r'\(De\)',
+            r'\(Spain\)', r'\(S\)', r'\(Es\)', r'\(Italy\)', r'\(I\)', r'\(It\)',
+            r'\(En\)', r'\(En,.*?\)', r'\(English\)', r'\(French\)', r'\(German\)',
+            r'\(Spanish\)', r'\(Italian\)', r'\(Japanese\)',
+            r'\(Multi\)', r'\(Multi\d*\)', r'\(M\d+\)',
+            r'\(Rev\s*[\dA-Z\.]+\)', r'\(v[\d\.]+[a-z]?\)', r'\(Ver\.?\s*[\d\.]+\)',
+            r'\[!\]', r'\[a\d?\]', r'\[b\d?\]', r'\[c\]', r'\[f\d?\]',
+            r'\[h\d*[A-Za-z]*\]', r'\[o\d?\]', r'\[p\d?\]', r'\[t\d?\]',
+            r'\[T[+-][A-Za-z]+[^\]]*\]',
+            r'\(NTSC\)', r'\(NTSC-U\)', r'\(NTSC-J\)', r'\(PAL\)', r'\(SECAM\)',
+            r'\(\d{4}-\d{2}-\d{2}\)', r'\(\d{8}\)', r'\(Unl\)',
+            r'\(Decrypted\)', r'\(Encrypted\)',
+        ]
+        
+        # Multi-region patterns
+        region_words = [
+            'USA', 'Europe', 'Japan', 'Asia', 'World', 'Korea', 'Australia',
+            'France', 'Germany', 'Spain', 'Italy', 'En', 'Fr', 'De', 'Es', 'It',
+            'U', 'E', 'J', 'A', 'K', 'W', 'G', 'F', 'S', 'I', 'EU', 'JP', 'KR', 'AU'
+        ]
+        region_pattern = r'\(\s*(?:' + '|'.join(re.escape(r) for r in region_words) + r')(?:\s*,\s*(?:' + '|'.join(re.escape(r) for r in region_words) + r'))+\s*\)'
+        name = re.sub(region_pattern, '', name, flags=re.IGNORECASE)
+        
+        # Remove unwanted tags
+        for pattern in remove_patterns:
+            name = re.sub(pattern, '', name, flags=re.IGNORECASE)
+        
+        # Remove 2-3 letter codes in parentheses
+        name = re.sub(r'\s*\([A-Za-z]{1,3}\)(?!\s*\.)', '', name)
+        
+        # Clean up spaces
+        name = re.sub(r'\s+', ' ', name)
+        name = re.sub(r'\s+\.', '.', name)
+        name = name.strip()
+        
+        return name
+
+    def about_dialog(self):
+        """Show About dialog with credits"""
+        dialog = Toplevel(self.master)
+        dialog.title("◄ ABOUT ►")
+        dialog.geometry("550x520")
+        dialog.resizable(False, False)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+        
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=12)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="◄ ROM CONVERTER ►", font=self.font_title,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="ROM Management & Conversion Tool", font=self.font_small,
+              fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack(pady=(4, 0))
+        
+        # Developer
+        dev_frame = Frame(dialog, bg=COLORS['bg_medium'], pady=10, padx=10)
+        dev_frame.pack(fill="x", padx=10, pady=5)
+        Label(dev_frame, text="👨‍💻 DEVELOPED BY", font=self.font_label_bold,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_medium']).pack()
+        Label(dev_frame, text="WoofahRayetCode", font=self.font_heading_md,
+              fg=COLORS['accent_purple'], bg=COLORS['bg_medium']).pack(pady=(4, 0))
+        Label(dev_frame, text=f"Build: {self.build_timestamp}", font=self.font_small,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_medium']).pack(pady=(6, 0))
+        
+        # Credits section
+        credits_frame = Frame(dialog, bg=COLORS['bg_dark'], padx=10, pady=5)
+        credits_frame.pack(fill="both", expand=True, padx=10)
+        
+        Label(credits_frame, text="🛠️ TOOLS & CREDITS", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(5, 8))
+        
+        # Scrollable credits
+        credits_text = Text(credits_frame, wrap="word", height=14, font=self.font_body,
+                           bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                           relief="flat", padx=10, pady=10)
+        credits_text.pack(fill="both", expand=True)
+        
+        credits_content = """◆ CHDMAN
+   Developer: MAME Team
+   Purpose: CHD compression for disc images
+   License: BSD/GPL
+
+◆ MAXCSO
+   Developer: Unknown W. Brackets
+   Purpose: CSO/ZSO compression for PSP ISOs
+   License: ISC
+
+◆ 7-Zip
+   Developer: Igor Pavlov
+   Purpose: Archive extraction (7z, RAR, etc.)
+   License: LGPL/BSD
+
+◆ NDecrypt
+   Developer: SabreTools Team
+   Purpose: 3DS ROM decryption
+   License: MIT
+
+◆ Python & Tkinter
+   Developer: Python Software Foundation
+   Purpose: Application framework
+   License: PSF License
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+This program is provided as-is for personal use.
+Please respect copyright and only use with legally
+obtained ROM files.
+"""
+        credits_text.insert("1.0", credits_content)
+        credits_text.configure(state="disabled")
+        
+        # Close button
+        Button(dialog, text="✕ CLOSE", command=dialog.destroy,
+               font=self.font_button, bg=COLORS['bg_light'],
+               fg=COLORS['text_primary'], relief="flat", cursor="hand2",
+               padx=20, pady=5).pack(pady=10)
+
+    def decrypt_3ds_dialog(self):
+        """Open dialog for 3DS ROM management: extract, decrypt, and move"""
+        dialog = Toplevel(self.master)
+        dialog.title("◄ 3DS ROM MANAGER ►")
+        dialog.geometry("850x750")
+        dialog.resizable(True, True)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+        
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="🎮 3DS ROM MANAGER", font=self.font_heading_md,
+              fg=COLORS['accent_purple'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="Extract → Decrypt → Move", font=self.font_small,
+              fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
+        
+        # Status frame
+        status_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        status_frame.pack(fill="x")
+        
+        # Check for keys and NDecrypt
+        keys_available = self.find_aes_keys_file() is not None
+        config_exists = False
+        if self.ndecrypt_path:
+            config_exists = (Path(self.ndecrypt_path).parent / "config.json").exists()
+        
+        if self.ndecrypt_path and (keys_available or config_exists):
+            ndecrypt_status = "✅ NDecrypt Ready"
+            status_color = COLORS['button_green']
+        elif self.ndecrypt_path:
+            ndecrypt_status = "⚠️ NDecrypt OK, keys missing"
+            status_color = COLORS['accent_yellow']
+        else:
+            ndecrypt_status = "❌ NDecrypt not configured"
+            status_color = COLORS['accent_red']
+        
+        Label(status_frame, text=f"Decryption: {ndecrypt_status}", 
+              font=self.font_small, fg=status_color, bg=COLORS['bg_dark']).pack(side="left", padx=(0, 20))
+        
+        if not self.ndecrypt_path:
+            Button(status_frame, text="[ DOWNLOAD ]", command=self.download_ndecrypt,
+                   font=self.font_small, bg=COLORS['accent_purple'],
+                   fg="white", relief="flat", cursor="hand2").pack(side="left")
+        
+        # Source directory (for archives or ROMs)
+        source_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        source_frame.pack(fill="x")
+        
+        Label(source_frame, text="📂 Source Folder:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left")
+        source_entry = Entry(source_frame, font=self.font_body,
+                            bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                            insertbackground=COLORS['text_primary'], relief="flat")
+        source_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
+        # Pre-fill with saved 3DS source dir, fallback to general source_dir
+        if self.threeds_source_dir:
+            source_entry.insert(0, self.threeds_source_dir)
+        elif self.source_dir:
+            source_entry.insert(0, self.source_dir)
+        
+        def browse_source():
+            folder = filedialog.askdirectory(title="Select Source Folder")
+            if folder:
+                source_entry.delete(0, "end")
+                source_entry.insert(0, folder)
+        
+        Button(source_frame, text="📁", command=browse_source,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left")
+        
+        # Destination directory (for moving)
+        dest_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        dest_frame.pack(fill="x")
+        
+        Label(dest_frame, text="📁 Destination:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left")
+        dest_entry = Entry(dest_frame, font=self.font_body,
+                          bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                          insertbackground=COLORS['text_primary'], relief="flat")
+        dest_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
+        
+        # Pre-fill with saved 3DS destination, fallback to system_extract_dirs
+        if self.threeds_dest_dir:
+            dest_entry.insert(0, self.threeds_dest_dir)
+        elif 'Nintendo 3DS' in self.system_extract_dirs:
+            dest_entry.insert(0, self.system_extract_dirs['Nintendo 3DS'])
+        
+        def browse_dest():
+            folder = filedialog.askdirectory(title="Select Destination Folder for 3DS ROMs")
+            if folder:
+                dest_entry.delete(0, "end")
+                dest_entry.insert(0, folder)
+                self.system_extract_dirs['Nintendo 3DS'] = folder
+                self.save_config()
+        
+        Button(dest_frame, text="📁", command=browse_dest,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left")
+        
+        # Options
+        options_frame = Frame(dialog, padx=10, pady=8, bg=COLORS['bg_light'])
+        options_frame.pack(fill="x", padx=10, pady=5)
+        
+        cb_bg = COLORS['bg_light']
+        
+        # Row 1
+        opt_row1 = Frame(options_frame, bg=cb_bg)
+        opt_row1.pack(fill="x", pady=2)
+        
+        recursive_scan = BooleanVar(value=True)
+        Checkbutton(opt_row1, text="↳ Scan subdirectories", 
+                   variable=recursive_scan, font=self.font_small,
+                   fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left", padx=(0, 20))
+        
+        backup_original = BooleanVar(value=self.threeds_backup_original)
+        Checkbutton(opt_row1, text="📁 Backup before decryption", 
+                   variable=backup_original, font=self.font_small,
+                   fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left", padx=(0, 20))
+        
+        auto_clean_names = BooleanVar(value=self.threeds_auto_clean_names)
+        Checkbutton(opt_row1, text="✨ Clean filenames", 
+                   variable=auto_clean_names, font=self.font_small,
+                   fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left")
+        
+        # Row 2 - Workflow options
+        opt_row2 = Frame(options_frame, bg=cb_bg)
+        opt_row2.pack(fill="x", pady=2)
+        
+        delete_archives = BooleanVar(value=self.threeds_delete_archives)
+        Checkbutton(opt_row2, text="🗑️ Delete archives after extraction", 
+                   variable=delete_archives, font=self.font_small,
+                   fg=COLORS['accent_red'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left", padx=(0, 20))
+        
+        delete_after_move = BooleanVar(value=self.threeds_delete_after_move)
+        Checkbutton(opt_row2, text="🗑️ Delete source after move", 
+                   variable=delete_after_move, font=self.font_small,
+                   fg=COLORS['accent_red'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left")
+        
+        # Function to save settings when checkboxes change
+        def save_3ds_settings(*args):
+            self.threeds_backup_original = backup_original.get()
+            self.threeds_delete_archives = delete_archives.get()
+            self.threeds_delete_after_move = delete_after_move.get()
+            self.threeds_auto_clean_names = auto_clean_names.get()
+            self.save_config()
+        
+        # Trace checkbox changes
+        backup_original.trace_add('write', save_3ds_settings)
+        delete_archives.trace_add('write', save_3ds_settings)
+        delete_after_move.trace_add('write', save_3ds_settings)
+        auto_clean_names.trace_add('write', save_3ds_settings)
+        
+        # Save paths when focus leaves entry fields
+        def save_source_path(event=None):
+            self.threeds_source_dir = source_entry.get().strip()
+            self.save_config()
+        
+        def save_dest_path(event=None):
+            self.threeds_dest_dir = dest_entry.get().strip()
+            self.system_extract_dirs['Nintendo 3DS'] = self.threeds_dest_dir
+            self.save_config()
+        
+        source_entry.bind('<FocusOut>', save_source_path)
+        dest_entry.bind('<FocusOut>', save_dest_path)
+        
+        # Results area
+        results_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        results_frame.pack(fill="both", expand=True)
+        
+        Label(results_frame, text="◄ OPERATION LOG ►", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(0, 4))
+        
+        list_frame = Frame(results_frame, bg=COLORS['bg_dark'])
+        list_frame.pack(fill="both", expand=True)
+        
+        scrollbar = Scrollbar(list_frame, bg=COLORS['bg_light'],
+                             troughcolor=COLORS['bg_dark'])
+        scrollbar.pack(side="right", fill="y")
+        
+        results_text = Text(list_frame, wrap="word", yscrollcommand=scrollbar.set,
+                           height=18, font=self.font_mono,
+                           bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                           insertbackground=COLORS['text_primary'], relief="flat",
+                           padx=8, pady=8)
+        results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=results_text.yview)
+        
+        # Track found items
+        found_archives = []
+        found_roms = []
+        extracted_roms = []
+        
+        def log_msg(msg):
+            results_text.insert("end", msg + "\n")
+            results_text.see("end")
+            dialog.update()
+        
+        def clear_log():
+            results_text.delete("1.0", "end")
+        
+        # ===== STEP 1: EXTRACT =====
+        def extract_3ds_archives():
+            """Extract 3DS ROMs from archives"""
+            source = source_entry.get()
+            if not source or not os.path.isdir(source):
+                messagebox.showwarning("Warning", "Please select a valid source folder")
+                return
+            
+            clear_log()
+            found_archives.clear()
+            extracted_roms.clear()
+            
+            log_msg("📦 STEP 1: EXTRACTING 3DS ARCHIVES")
+            log_msg("=" * 50)
+            log_msg(f"Scanning: {source}\n")
+            
+            # Find archives
+            archives = self.find_compressed_files(source, recursive_scan.get())
+            
+            if not archives:
+                log_msg("No archive files found.")
+                return
+            
+            log_msg(f"Found {len(archives)} archive(s). Scanning for 3DS content...\n")
+            
+            extensions_3ds = {'.3ds', '.cia'}
+            archives_with_3ds = []
+            
+            for archive in archives:
+                try:
+                    archive_path = Path(archive)
+                    ext = archive_path.suffix.lower()
+                    has_3ds = False
+                    
+                    if ext == '.zip':
+                        with zipfile.ZipFile(archive_path, 'r') as zf:
+                            for name in zf.namelist():
+                                if Path(name).suffix.lower() in extensions_3ds:
+                                    has_3ds = True
+                                    break
+                    elif ext in ['.7z', '.rar'] and self.seven_zip_path:
+                        cmd = [self.seven_zip_path, 'l', '-ba', str(archive_path)]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                        if result.returncode == 0:
+                            for line in result.stdout.split('\n'):
+                                if any(line.lower().endswith(e) for e in extensions_3ds):
+                                    has_3ds = True
+                                    break
+                    
+                    if has_3ds:
+                        archives_with_3ds.append(archive)
+                        found_archives.append(archive)
+                        log_msg(f"  📦 {archive.name} - contains 3DS ROMs")
+                except Exception as e:
+                    log_msg(f"  ⚠️ {archive.name} - scan error: {e}")
+            
+            if not archives_with_3ds:
+                log_msg("\nNo archives containing 3DS ROMs found.")
+                return
+            
+            log_msg(f"\n{'─' * 50}")
+            log_msg(f"Found {len(archives_with_3ds)} archive(s) with 3DS ROMs")
+            log_msg(f"{'─' * 50}\n")
+            
+            # Extract
+            for archive in archives_with_3ds:
+                log_msg(f"📦 Extracting: {archive.name}")
+                success, folder = self.extract_archive(archive)
+                
+                if success and folder:
+                    # Find extracted 3DS files
+                    for f in folder.rglob("*"):
+                        if f.is_file() and f.suffix.lower() in extensions_3ds:
+                            extracted_roms.append(f)
+                            log_msg(f"   ✅ {f.name}")
+                    
+                    if delete_archives.get():
+                        try:
+                            archive.unlink()
+                            log_msg(f"   🗑️ Archive deleted")
+                        except Exception as e:
+                            log_msg(f"   ⚠️ Could not delete archive: {e}")
+                else:
+                    log_msg(f"   ❌ Extraction failed")
+            
+            log_msg(f"\n{'━' * 50}")
+            log_msg(f"✅ Extracted {len(extracted_roms)} 3DS ROM(s)")
+            
+            # Update found_roms with extracted ones
+            found_roms.clear()
+            found_roms.extend(extracted_roms)
+        
+        # ===== STEP 2: DECRYPT =====
+        def decrypt_3ds_roms():
+            """Decrypt 3DS ROM files"""
+            if not self.ndecrypt_path:
+                messagebox.showerror("Error", "NDecrypt not configured. Please download it first.")
+                return
+            
+            # If no ROMs found yet, scan for them
+            if not found_roms:
+                source = source_entry.get()
+                if not source or not os.path.isdir(source):
+                    messagebox.showwarning("Warning", "Please select a valid source folder")
+                    return
+                
+                clear_log()
+                log_msg("🔓 STEP 2: DECRYPTING 3DS ROMS")
+                log_msg("=" * 50)
+                log_msg("Scanning for 3DS ROM files...\n")
+                
+                path = Path(source)
+                extensions_3ds = {'.3ds', '.cia'}
+                
+                if recursive_scan.get():
+                    all_files = list(path.rglob("*"))
+                else:
+                    all_files = list(path.glob("*"))
+                
+                for f in all_files:
+                    if f.is_file() and f.suffix.lower() in extensions_3ds:
+                        found_roms.append(f)
+                
+                if not found_roms:
+                    log_msg("No .3ds or .cia files found.")
+                    return
+                
+                log_msg(f"Found {len(found_roms)} ROM(s)")
+            else:
+                clear_log()
+                log_msg("🔓 STEP 2: DECRYPTING 3DS ROMS")
+                log_msg("=" * 50)
+            
+            # Setup keys
+            log_msg("\nChecking encryption keys...")
+            if self.setup_ndecrypt_keys():
+                log_msg("✅ Keys configured\n")
+            else:
+                config_path = Path(self.ndecrypt_path).parent / "config.json"
+                if not config_path.exists():
+                    log_msg("❌ Keys not found!")
+                    messagebox.showerror("Error", "Encryption keys not found!")
+                    return
+            
+            success_count = 0
+            error_count = 0
+            
+            for rom_file in found_roms:
+                log_msg(f"🔓 {rom_file.name}")
+                
+                try:
+                    if backup_original.get():
+                        backup_dir = rom_file.parent / "encrypted_backup"
+                        backup_dir.mkdir(exist_ok=True)
+                        backup_path = backup_dir / rom_file.name
+                        if not backup_path.exists():
+                            shutil.copy2(rom_file, backup_path)
+                            log_msg(f"   📁 Backup created")
+                    
+                    cmd = [self.ndecrypt_path, "d", str(rom_file)]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                                          cwd=Path(self.ndecrypt_path).parent)
+                    
+                    if result.returncode == 0:
+                        log_msg(f"   ✅ Decrypted")
+                        success_count += 1
+                    else:
+                        error_msg = result.stderr.strip() or result.stdout.strip() or "Unknown error"
+                        log_msg(f"   ❌ Failed: {error_msg[:80]}")
+                        error_count += 1
+                        
+                except subprocess.TimeoutExpired:
+                    log_msg(f"   ❌ Timeout")
+                    error_count += 1
+                except Exception as e:
+                    log_msg(f"   ❌ Error: {e}")
+                    error_count += 1
+            
+            log_msg(f"\n{'━' * 50}")
+            log_msg(f"✅ Decrypted: {success_count} | ❌ Errors: {error_count}")
+        
+        # ===== STEP 3: MOVE =====
+        def move_3ds_roms():
+            """Move 3DS ROMs to destination folder"""
+            dest = dest_entry.get().strip()
+            if not dest:
+                messagebox.showwarning("Warning", "Please specify a destination folder")
+                return
+            
+            # If no ROMs tracked, scan for them
+            if not found_roms:
+                source = source_entry.get()
+                if not source or not os.path.isdir(source):
+                    messagebox.showwarning("Warning", "Please select a valid source folder")
+                    return
+                
+                path = Path(source)
+                extensions_3ds = {'.3ds', '.cia'}
+                
+                if recursive_scan.get():
+                    all_files = list(path.rglob("*"))
+                else:
+                    all_files = list(path.glob("*"))
+                
+                for f in all_files:
+                    if f.is_file() and f.suffix.lower() in extensions_3ds:
+                        found_roms.append(f)
+            
+            if not found_roms:
+                messagebox.showwarning("Warning", "No 3DS ROMs found to move")
+                return
+            
+            clear_log()
+            log_msg("📁 STEP 3: MOVING 3DS ROMS")
+            log_msg("=" * 50)
+            log_msg(f"Destination: {dest}\n")
+            
+            dest_path = Path(dest)
+            dest_path.mkdir(parents=True, exist_ok=True)
+            
+            moved_count = 0
+            error_count = 0
+            
+            for rom_file in found_roms:
+                try:
+                    # Apply filename cleaning if enabled
+                    if auto_clean_names.get():
+                        clean_name = self.clean_rom_filename(rom_file.name)
+                        target = dest_path / clean_name
+                    else:
+                        target = dest_path / rom_file.name
+                    
+                    if target.exists():
+                        log_msg(f"⚠️ {rom_file.name} - already exists, skipping")
+                        continue
+                    
+                    if delete_after_move.get():
+                        shutil.move(str(rom_file), str(target))
+                        if auto_clean_names.get() and target.name != rom_file.name:
+                            log_msg(f"✅ {rom_file.name} → {target.name}")
+                        else:
+                            log_msg(f"✅ {rom_file.name} - moved")
+                    else:
+                        shutil.copy2(rom_file, target)
+                        if auto_clean_names.get() and target.name != rom_file.name:
+                            log_msg(f"✅ {rom_file.name} → {target.name}")
+                        else:
+                            log_msg(f"✅ {rom_file.name} - copied")
+                    moved_count += 1
+                except Exception as e:
+                    log_msg(f"❌ {rom_file.name} - {e}")
+                    error_count += 1
+            
+            log_msg(f"\n{'━' * 50}")
+            log_msg(f"✅ Processed: {moved_count} | ❌ Errors: {error_count}")
+            
+            # Save destination for future use
+            self.system_extract_dirs['Nintendo 3DS'] = dest
+            self.save_config()
+        
+        # ===== ALL-IN-ONE =====
+        def run_full_workflow():
+            """Run complete Extract → Decrypt → Move workflow"""
+            source = source_entry.get()
+            dest = dest_entry.get().strip()
+            
+            if not source or not os.path.isdir(source):
+                messagebox.showwarning("Warning", "Please select a valid source folder")
+                return
+            
+            if not dest:
+                messagebox.showwarning("Warning", "Please specify a destination folder")
+                return
+            
+            if not self.ndecrypt_path:
+                messagebox.showerror("Error", "NDecrypt not configured. Please download it first.")
+                return
+            
+            confirm = messagebox.askyesno(
+                "Run Full Workflow",
+                "This will:\n\n"
+                "1. Extract 3DS ROMs from archives\n"
+                "2. Decrypt all .3ds/.cia files\n"
+                "3. Move decrypted ROMs to destination\n\n"
+                f"Source: {source}\n"
+                f"Destination: {dest}\n\n"
+                "Continue?"
+            )
+            
+            if not confirm:
+                return
+            
+            clear_log()
+            log_msg("🚀 FULL WORKFLOW: EXTRACT → DECRYPT → MOVE")
+            log_msg("=" * 50)
+            log_msg("")
+            
+            # Step 1: Extract
+            found_archives.clear()
+            found_roms.clear()
+            extracted_roms.clear()
+            
+            log_msg("📦 STEP 1: EXTRACTING ARCHIVES")
+            log_msg("─" * 40)
+            
+            archives = self.find_compressed_files(source, recursive_scan.get())
+            extensions_3ds = {'.3ds', '.cia'}
+            
+            if archives:
+                for archive in archives:
+                    try:
+                        archive_path = Path(archive)
+                        ext = archive_path.suffix.lower()
+                        has_3ds = False
+                        
+                        if ext == '.zip':
+                            with zipfile.ZipFile(archive_path, 'r') as zf:
+                                for name in zf.namelist():
+                                    if Path(name).suffix.lower() in extensions_3ds:
+                                        has_3ds = True
+                                        break
+                        
+                        if has_3ds:
+                            log_msg(f"📦 {archive.name}")
+                            success, folder = self.extract_archive(archive)
+                            if success and folder:
+                                for f in folder.rglob("*"):
+                                    if f.is_file() and f.suffix.lower() in extensions_3ds:
+                                        found_roms.append(f)
+                                        log_msg(f"   ✅ {f.name}")
+                                
+                                if delete_archives.get():
+                                    try:
+                                        archive.unlink()
+                                        log_msg(f"   🗑️ Archive deleted")
+                                    except:
+                                        pass
+                    except:
+                        pass
+            
+            # Also scan for loose ROM files
+            path = Path(source)
+            if recursive_scan.get():
+                all_files = list(path.rglob("*"))
+            else:
+                all_files = list(path.glob("*"))
+            
+            for f in all_files:
+                if f.is_file() and f.suffix.lower() in extensions_3ds and f not in found_roms:
+                    found_roms.append(f)
+            
+            log_msg(f"\n✅ Found {len(found_roms)} 3DS ROM(s)\n")
+            
+            if not found_roms:
+                log_msg("No 3DS ROMs found. Workflow stopped.")
+                return
+            
+            # Step 2: Decrypt
+            log_msg("🔓 STEP 2: DECRYPTING")
+            log_msg("─" * 40)
+            
+            if self.setup_ndecrypt_keys():
+                log_msg("✅ Keys configured\n")
+            
+            decrypt_success = 0
+            decrypt_errors = 0
+            
+            for rom_file in found_roms:
+                log_msg(f"🔓 {rom_file.name}")
+                try:
+                    if backup_original.get():
+                        backup_dir = rom_file.parent / "encrypted_backup"
+                        backup_dir.mkdir(exist_ok=True)
+                        backup_path = backup_dir / rom_file.name
+                        if not backup_path.exists():
+                            shutil.copy2(rom_file, backup_path)
+                    
+                    cmd = [self.ndecrypt_path, "d", str(rom_file)]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                                          cwd=Path(self.ndecrypt_path).parent)
+                    
+                    if result.returncode == 0:
+                        log_msg(f"   ✅ Decrypted")
+                        decrypt_success += 1
+                    else:
+                        log_msg(f"   ❌ Failed")
+                        decrypt_errors += 1
+                except:
+                    log_msg(f"   ❌ Error")
+                    decrypt_errors += 1
+            
+            log_msg(f"\n✅ Decrypted: {decrypt_success} | ❌ Errors: {decrypt_errors}\n")
+            
+            # Step 3: Move
+            log_msg("📁 STEP 3: MOVING TO DESTINATION")
+            log_msg("─" * 40)
+            log_msg(f"Destination: {dest}\n")
+            
+            dest_path = Path(dest)
+            dest_path.mkdir(parents=True, exist_ok=True)
+            
+            move_success = 0
+            move_errors = 0
+            
+            for rom_file in found_roms:
+                try:
+                    if not rom_file.exists():
+                        continue
+                    
+                    # Apply filename cleaning if enabled
+                    if auto_clean_names.get():
+                        clean_name = self.clean_rom_filename(rom_file.name)
+                        target = dest_path / clean_name
+                    else:
+                        target = dest_path / rom_file.name
+                    
+                    if target.exists():
+                        log_msg(f"⚠️ {rom_file.name} - exists")
+                        continue
+                    
+                    if delete_after_move.get():
+                        shutil.move(str(rom_file), str(target))
+                    else:
+                        shutil.copy2(rom_file, target)
+                    
+                    if auto_clean_names.get() and target.name != rom_file.name:
+                        log_msg(f"✅ {rom_file.name} → {target.name}")
+                    else:
+                        log_msg(f"✅ {rom_file.name}")
+                    move_success += 1
+                except Exception as e:
+                    log_msg(f"❌ {rom_file.name}")
+                    move_errors += 1
+            
+            log_msg(f"\n{'━' * 50}")
+            log_msg("🎉 WORKFLOW COMPLETE!")
+            log_msg(f"{'━' * 50}")
+            log_msg(f"Extracted: {len(found_roms)} ROM(s)")
+            log_msg(f"Decrypted: {decrypt_success} | Errors: {decrypt_errors}")
+            log_msg(f"Moved: {move_success} | Errors: {move_errors}")
+            
+            # Save paths and settings
+            self.threeds_source_dir = source
+            self.threeds_dest_dir = dest
+            self.system_extract_dirs['Nintendo 3DS'] = dest
+            self.save_config()
+            
+            messagebox.showinfo("Workflow Complete",
+                f"✅ Extracted: {len(found_roms)} ROM(s)\n"
+                f"✅ Decrypted: {decrypt_success}\n"
+                f"✅ Moved: {move_success}\n\n"
+                f"Destination: {dest}")
+        
+        # Action buttons - Individual steps
+        steps_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        steps_frame.pack(fill="x")
+        
+        Label(steps_frame, text="Individual Steps:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
+        
+        Button(steps_frame, text="1️⃣ EXTRACT", command=extract_3ds_archives,
+               font=self.font_small,
+               bg=COLORS['button_blue'], fg="white",
+               activebackground=COLORS['text_secondary'],
+               relief="flat", cursor="hand2", padx=10, pady=3).pack(side="left", padx=3)
+        
+        Button(steps_frame, text="2️⃣ DECRYPT", command=decrypt_3ds_roms,
+               font=self.font_small,
+               bg=COLORS['accent_purple'], fg="white",
+               activebackground=COLORS['accent_pink'],
+               relief="flat", cursor="hand2", padx=10, pady=3).pack(side="left", padx=3)
+        
+        Button(steps_frame, text="3️⃣ MOVE", command=move_3ds_roms,
+               font=self.font_small,
+               bg=COLORS['accent_orange'], fg="white",
+               activebackground=COLORS['accent_yellow'],
+               relief="flat", cursor="hand2", padx=10, pady=3).pack(side="left", padx=3)
+        
+        # Action buttons - All-in-one and close
+        action_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        action_frame.pack(fill="x")
+        
+        Button(action_frame, text="🚀 RUN FULL WORKFLOW", command=run_full_workflow,
+               font=self.font_button,
+               bg=COLORS['button_green'], fg=COLORS['bg_dark'],
+               activebackground=COLORS['text_primary'],
+               relief="flat", cursor="hand2", padx=20, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="✕ CLOSE", command=dialog.destroy,
+               font=self.font_button,
+               activebackground=COLORS['accent_red'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
     def save_config(self):
         """Save configuration to JSON file"""
         try:
@@ -719,14 +2045,25 @@ Format Recommendations
                 'process_ps1_cues': self.process_ps1_cues.get(),
                 'process_ps2_cues': self.process_ps2_cues.get(),
                 'process_ps2_isos': self.process_ps2_isos.get(),
+                'process_psp_isos': self.process_psp_isos.get(),
                 'extract_compressed': self.extract_compressed.get(),
                 'delete_archives_after_extract': self.delete_archives_after_extract.get(),
                 'chdman_path': self._make_portable_path(self.chdman_path),
                 'seven_zip_path': self._make_portable_path(self.seven_zip_path),
                 'maxcso_path': self._make_portable_path(self.maxcso_path),
+                'ndecrypt_path': self._make_portable_path(self.ndecrypt_path),
                 'ps2_output_format': self.ps2_output_format,
+                'psp_output_format': self.psp_output_format,
                 'ps2_emulator': self.ps2_emulator,
-                'theme': self.current_theme
+                'theme': self.current_theme,
+                'system_extract_dirs': {k: self._make_portable_path(v) for k, v in self.system_extract_dirs.items()},
+                # 3DS workflow settings
+                'threeds_backup_original': self.threeds_backup_original,
+                'threeds_delete_archives': self.threeds_delete_archives,
+                'threeds_delete_after_move': self.threeds_delete_after_move,
+                'threeds_auto_clean_names': self.threeds_auto_clean_names,
+                'threeds_source_dir': self._make_portable_path(self.threeds_source_dir),
+                'threeds_dest_dir': self._make_portable_path(self.threeds_dest_dir),
             }
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
@@ -749,9 +2086,11 @@ Format Recommendations
                 self.process_ps1_cues.set(config.get('process_ps1_cues', False))
                 self.process_ps2_cues.set(config.get('process_ps2_cues', False))
                 self.process_ps2_isos.set(config.get('process_ps2_isos', False))
+                self.process_psp_isos.set(config.get('process_psp_isos', False))
                 self.extract_compressed.set(config.get('extract_compressed', True))
                 self.delete_archives_after_extract.set(config.get('delete_archives_after_extract', False))
                 self.ps2_output_format = config.get('ps2_output_format', 'CHD')
+                self.psp_output_format = config.get('psp_output_format', 'CSO')
                 self.ps2_emulator = config.get('ps2_emulator', 'PCSX2')
                 self.current_theme = config.get('theme', 'PS2')
                 
@@ -769,6 +2108,26 @@ Format Recommendations
                 saved_maxcso = self._resolve_portable_path(config.get('maxcso_path'))
                 if saved_maxcso and os.path.exists(saved_maxcso):
                     self.maxcso_path = saved_maxcso
+                
+                # Restore ndecrypt path if saved and still exists
+                saved_ndecrypt = self._resolve_portable_path(config.get('ndecrypt_path'))
+                if saved_ndecrypt and os.path.exists(saved_ndecrypt):
+                    self.ndecrypt_path = saved_ndecrypt
+                
+                # Restore system extraction directories
+                saved_system_dirs = config.get('system_extract_dirs', {})
+                for system, path in saved_system_dirs.items():
+                    resolved_path = self._resolve_portable_path(path)
+                    if resolved_path and os.path.isdir(resolved_path):
+                        self.system_extract_dirs[system] = resolved_path
+                
+                # Restore 3DS workflow settings
+                self.threeds_backup_original = config.get('threeds_backup_original', True)
+                self.threeds_delete_archives = config.get('threeds_delete_archives', False)
+                self.threeds_delete_after_move = config.get('threeds_delete_after_move', False)
+                self.threeds_auto_clean_names = config.get('threeds_auto_clean_names', True)
+                self.threeds_source_dir = self._resolve_portable_path(config.get('threeds_source_dir', '')) or ""
+                self.threeds_dest_dir = self._resolve_portable_path(config.get('threeds_dest_dir', '')) or ""
         except Exception as e:
             # Silently fail - use defaults
             pass
@@ -810,6 +2169,92 @@ Format Recommendations
                 self.current_batch_id = None
         except Exception:
             pass
+    
+    def ensure_metadata_loaded(self):
+        """Ensure metadata DAT files are present and parsed."""
+        if self.metadata_index:
+            return
+        try:
+            self.metadata_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        
+        for system, url in self.metadata_sources.items():
+            dat_path = self.metadata_dir / f"{system.replace(' ', '_').lower()}.dat"
+            if not dat_path.exists():
+                try:
+                    self.log(f"⬇️  Downloading {system} metadata DAT...")
+                    urllib.request.urlretrieve(url, dat_path)
+                    self.log(f"✅ Saved: {dat_path.name}")
+                except Exception as e:
+                    self.log(f"⚠️  Could not download {system} DAT: {e}")
+                    continue
+            self.parse_dat_file(dat_path, system)
+    
+    def parse_dat_file(self, dat_path, system_name):
+        """Parse a clrmamepro DAT and populate metadata index."""
+        try:
+            if dat_path.suffix.lower() == '.gz':
+                with gzip.open(dat_path, 'rt', encoding='utf-8', errors='ignore') as f:
+                    data = f.read()
+            else:
+                with open(dat_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    data = f.read()
+            if not data:
+                return
+            root = ET.fromstring(data)
+            for game in root.findall('.//game'):
+                rom = game.find('rom')
+                if rom is None:
+                    continue
+                name = rom.attrib.get('name', '').strip()
+                if not name:
+                    continue
+                size = rom.attrib.get('size')
+                size_val = int(size) if size and size.isdigit() else None
+                title = game.findtext('description') or game.attrib.get('name', '')
+                key = name.lower()
+                if key not in self.metadata_index:
+                    self.metadata_index[key] = {'system': system_name, 'size': size_val, 'title': title}
+        except Exception as e:
+            self.log(f"⚠️  Failed to parse {dat_path.name}: {e}")
+    
+    def lookup_metadata(self, filename, size_bytes=None):
+        """Lookup system via metadata index using filename and optional size."""
+        key = Path(filename).name.lower()
+        info = self.metadata_index.get(key)
+        if info and info.get('size') and size_bytes:
+            expected = info['size']
+            if expected and abs(expected - size_bytes) > max(expected * 0.05, 2 * 1024 * 1024):
+                return None
+        return info
+    
+    def detect_iso_system(self, name, size_bytes=None):
+        """Determine whether an ISO is PS2 or PSP using metadata, IDs, and size."""
+        info = self.lookup_metadata(name, size_bytes)
+        if info and info.get('system'):
+            return info['system']
+        
+        lower_name = str(name).lower()
+        if any(token in lower_name for token in PSP_ID_PATTERNS):
+            return 'PSP'
+        if any(token in lower_name for token in PS2_ID_PATTERNS):
+            return 'PlayStation 2'
+        
+        path_parts = re.split(r'[\\/]', lower_name)
+        if any('psp' in part for part in path_parts):
+            return 'PSP'
+        if any('ps2' in part or 'playstation 2' in part for part in path_parts):
+            return 'PlayStation 2'
+        
+        if size_bytes is not None:
+            size_gb = size_bytes / (1024 * 1024 * 1024)
+            if size_gb >= 2.0:
+                return 'PlayStation 2'
+            if size_gb <= 1.9:
+                return 'PSP'
+        
+        return None
 
     def _make_portable_path(self, path_value):
         """Store paths relative to the app folder when possible for portability."""
@@ -932,7 +2377,7 @@ Format Recommendations
             self.title_frame.configure(bg=COLORS['bg_light'])
             for child in self.title_frame.winfo_children():
                 try:
-                    child.configure(bg=COLORS['bg_light'], fg=COLORS['text_secondary'])
+                    child.configure(bg=COLORS['bg_light'], fg=COLORS['text_primary'])
                 except Exception:
                     pass
     
@@ -983,6 +2428,12 @@ Format Recommendations
             self.log(f"🖌 Theme set to {chosen}.")
 
         self.theme_combo.bind("<<ComboboxSelected>>", on_theme_change)
+        
+        # About button
+        Button(theme_frame, text="ℹ️ About", command=self.about_dialog,
+               font=self.font_small, bg=COLORS['bg_medium'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2",
+               padx=8).pack(side="left", padx=(15, 0))
         
         # Directory selection
         dir_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
@@ -1040,7 +2491,7 @@ Format Recommendations
 
         # maxcso location (for CSO/ZSO output)
         maxcso_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        maxcso_frame.pack(fill="x", pady=(0, 12))
+        maxcso_frame.pack(fill="x", pady=(0, 8))
 
         Label(maxcso_frame, text="🗜  maxcso:", font=self.font_label_bold,
               fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
@@ -1050,6 +2501,27 @@ Format Recommendations
                                    fg=COLORS['text_secondary'] if self.maxcso_path else COLORS['text_muted'],
                                    bg=COLORS['bg_dark'], anchor="w")
         self.maxcso_label.pack(side="left", fill="x", expand=True)
+        
+        # NDecrypt path display (for 3DS decryption)
+        ndecrypt_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
+        ndecrypt_frame.pack(fill="x", pady=(0, 12))
+
+        Label(ndecrypt_frame, text="🔓 NDecrypt:", font=self.font_label_bold,
+              fg=COLORS['accent_purple'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
+        self.ndecrypt_label = Label(ndecrypt_frame, 
+                        text=self.ndecrypt_path or "Not set (required for 3DS decryption)",
+                        font=self.font_small,
+                                   fg=COLORS['text_secondary'] if self.ndecrypt_path else COLORS['text_muted'],
+                                   bg=COLORS['bg_dark'], anchor="w")
+        self.ndecrypt_label.pack(side="left", fill="x", expand=True)
+        
+        Button(ndecrypt_frame, text="[ SET ]", command=self.browse_ndecrypt,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left", padx=2)
+        
+        Button(ndecrypt_frame, text="[ DOWNLOAD ]", command=self.download_ndecrypt,
+               font=self.font_small, bg=COLORS['accent_purple'],
+               fg="white", relief="flat", cursor="hand2").pack(side="left", padx=2)
         
         # Options panel
         options_frame = Frame(self.main_frame, bg=COLORS['bg_light'], padx=10, pady=8)
@@ -1071,8 +2543,8 @@ Format Recommendations
         
         Checkbutton(options_frame, text="↳ Move originals to backup folder after conversion",
                    variable=self.move_to_backup, font=cb_font,
-                   fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                   activebackground=cb_bg, activeforeground=COLORS['text_secondary']).pack(anchor="w")
+                   fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
         
         Checkbutton(options_frame, text="⚠ Delete original files after successful conversion",
                    variable=self.delete_originals, font=cb_font,
@@ -1081,18 +2553,23 @@ Format Recommendations
 
         Checkbutton(options_frame, text="🎮 Process PS1 CUE files (.cue)",
                 variable=self.process_ps1_cues, font=cb_font,
-                fg=COLORS['button_green'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                activebackground=cb_bg, activeforeground=COLORS['button_green']).pack(anchor="w")
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
 
         Checkbutton(options_frame, text="🎮 Process PS2 BIN/CUE files (.cue)",
             variable=self.process_ps2_cues, font=cb_font,
-            fg=COLORS['button_green'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['button_green']).pack(anchor="w")
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
 
         Checkbutton(options_frame, text="🎮 Process PS2 ISO files (.iso)",
                 variable=self.process_ps2_isos, font=cb_font,
-                fg=COLORS['accent_purple'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                activebackground=cb_bg, activeforeground=COLORS['accent_purple']).pack(anchor="w")
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
+        Checkbutton(options_frame, text="🎮 Process PSP ISO files (.iso → CSO/ZSO)",
+                variable=self.process_psp_isos, font=cb_font,
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
 
         # Emulator preset selection
         emulator_frame = Frame(options_frame, bg=cb_bg)
@@ -1139,6 +2616,27 @@ Format Recommendations
                     self.log("⚠ maxcso is required for CSO/ZSO output. Set the path above.")
 
         self.ps2_emulator_combo.bind("<<ComboboxSelected>>", on_ps2_emulator_change)
+
+        # PSP output format selector
+        psp_format_frame = Frame(options_frame, bg=cb_bg)
+        psp_format_frame.pack(fill="x", pady=(4, 4))
+        Label(psp_format_frame, text="↳ PSP output format:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
+        psp_formats = ['CSO', 'ZSO']
+        self.psp_format_combo = ttk.Combobox(psp_format_frame, values=psp_formats,
+                            state="readonly", width=6)
+        if not hasattr(self, 'psp_output_format') or self.psp_output_format not in psp_formats:
+            self.psp_output_format = 'CSO'
+        self.psp_format_combo.set(self.psp_output_format)
+        self.psp_format_combo.pack(side="left", padx=8)
+
+        def on_psp_format_change(event=None):
+            self.psp_output_format = self.psp_format_combo.get()
+            self.save_config()
+            if not self.maxcso_path:
+                self.log("⚠ maxcso is required for PSP CSO/ZSO output. Set the path above.")
+
+        self.psp_format_combo.bind("<<ComboboxSelected>>", on_psp_format_change)
 
         Checkbutton(options_frame, text="📦 Extract compressed files before conversion",
                 variable=self.extract_compressed, font=cb_font,
@@ -1206,7 +2704,23 @@ Format Recommendations
                                         bg=COLORS['accent_pink'], fg="white",
                                         activebackground=COLORS['accent_purple'],
                                         relief="flat", cursor="hand2", padx=15, pady=5)
-        self.clean_names_button.pack(side="left")
+        self.clean_names_button.pack(side="left", padx=(0, 8))
+        
+        self.extract_archives_button = Button(button_frame, text="📦 EXTRACT ARCHIVES", 
+                                             command=self.extract_archives_dialog,
+                                             font=self.font_button,
+                                             bg=COLORS['accent_yellow'], fg=COLORS['bg_dark'],
+                                             activebackground=COLORS['accent_orange'],
+                                             relief="flat", cursor="hand2", padx=15, pady=5)
+        self.extract_archives_button.pack(side="left", padx=(0, 8))
+        
+        self.decrypt_3ds_button = Button(button_frame, text="🔓 DECRYPT 3DS", 
+                                        command=self.decrypt_3ds_dialog,
+                                        font=self.font_button,
+                                        bg=COLORS['accent_purple'], fg="white",
+                                        activebackground=COLORS['accent_pink'],
+                                        relief="flat", cursor="hand2", padx=15, pady=5)
+        self.decrypt_3ds_button.pack(side="left")
         
         # Progress bar with retro style
         progress_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
@@ -1265,6 +2779,7 @@ Format Recommendations
         self.process_ps1_cues.trace_add('write', lambda *args: self.save_config())
         self.process_ps2_cues.trace_add('write', lambda *args: self.save_config())
         self.process_ps2_isos.trace_add('write', lambda *args: self.save_config())
+        self.process_psp_isos.trace_add('write', lambda *args: self.save_config())
         self.extract_compressed.trace_add('write', lambda *args: self.save_config())
         self.delete_archives_after_extract.trace_add('write', lambda *args: self.save_config())
         
@@ -1430,12 +2945,16 @@ Format Recommendations
                 files.update(path.rglob("*.cue"))
             if self.process_ps2_isos.get():
                 files.update(path.rglob("*.iso"))
+            if self.process_psp_isos.get():
+                files.update(path.rglob("*.iso"))
         else:
             if self.process_ps1_cues.get():
                 files.update(path.glob("*.cue"))
             if self.process_ps2_cues.get():
                 files.update(path.glob("*.cue"))
             if self.process_ps2_isos.get():
+                files.update(path.glob("*.iso"))
+            if self.process_psp_isos.get():
                 files.update(path.glob("*.iso"))
         # Sort for stable processing order
         return sorted(files)
@@ -1470,6 +2989,9 @@ Format Recommendations
         if not self.source_dir or not os.path.isdir(self.source_dir):
             messagebox.showwarning("Warning", "Please select a valid directory")
             return
+        
+        # Prepare metadata for better ISO detection
+        self.ensure_metadata_loaded()
         
         self.log("\n" + "="*60)
         self.log("SCANNING FOR GAME FILES...")
@@ -1508,6 +3030,7 @@ Format Recommendations
 
         ps1_count = 0
         ps2_count = 0
+        psp_count = 0
         total_size = 0
 
         self.log(f"\nFound {len(game_files)} game descriptor file(s):\n")
@@ -1533,11 +3056,17 @@ Format Recommendations
                         self.log(f"   └─ {bin_file.name} ({size_mb:.1f} MB)")
                 game_size += game_file.stat().st_size  # CUE size (small)
             elif game_file.suffix.lower() == '.iso':
-                ps2_count += 1
                 iso_size = game_file.stat().st_size
                 size_gb = iso_size / (1024 * 1024 * 1024)
                 size_mb = iso_size / (1024 * 1024)
-                self.log(f"💿 [PS2] {game_file.name}")
+                system_guess = self.detect_iso_system(game_file.name, iso_size)
+                iso_label = 'PS2'
+                if system_guess == 'PSP':
+                    iso_label = 'PSP'
+                    psp_count += 1
+                else:
+                    ps2_count += 1
+                self.log(f"💿 [{iso_label}] {game_file.name}")
                 self.log(f"   Path: {game_file}")
                 if size_gb >= 1:
                     self.log(f"   └─ ISO size: {size_gb:.2f} GB")
@@ -1550,7 +3079,15 @@ Format Recommendations
         total_size_mb = total_size / (1024 * 1024)
         total_size_gb = total_size / (1024 * 1024 * 1024)
 
-        self.log(f"Totals: PS1: {ps1_count}  PS2: {ps2_count}  Combined: {ps1_count + ps2_count}")
+        # Build totals string
+        totals_parts = []
+        if ps1_count > 0:
+            totals_parts.append(f"CUE: {ps1_count}")
+        if ps2_count > 0:
+            totals_parts.append(f"PS2: {ps2_count}")
+        if psp_count > 0:
+            totals_parts.append(f"PSP: {psp_count}")
+        self.log(f"Totals: {' | '.join(totals_parts) if totals_parts else 'None'}  Combined: {len(game_files)}")
         if compressed_count > 0:
             self.log(f"📦 Plus {compressed_count} compressed file(s) to extract")
         if total_size_gb >= 1:
@@ -1558,7 +3095,15 @@ Format Recommendations
         else:
             self.log(f"💾 Current total size: {total_size_mb:.1f} MB")
 
-        status_text = f"Found PS1:{ps1_count} PS2:{ps2_count}"
+        # Build status text
+        status_parts = []
+        if ps1_count > 0:
+            status_parts.append(f"CUE:{ps1_count}")
+        if ps2_count > 0:
+            status_parts.append(f"PS2:{ps2_count}")
+        if psp_count > 0:
+            status_parts.append(f"PSP:{psp_count}")
+        status_text = f"Found {' '.join(status_parts) if status_parts else 'none'}"
         if compressed_count > 0:
             status_text += f" + {compressed_count} archives"
         status_text += f" | Size: {total_size_gb:.2f} GB"
@@ -1580,39 +3125,67 @@ Format Recommendations
             label = 'CD (CUE)'
             format_label = 'CHD'
         elif ext == '.iso':
-            # Determine output format for PS2
-            fmt = self.ps2_output_format.upper()
-            if fmt == 'CHD':
-                output_path = path.with_suffix('.chd')
-                if output_path.exists():
-                    self.log(f"  ⚠️  CHD already exists, skipping: {output_path.name}")
-                    return True
-                cmd = [self.chdman_path, 'createdvd', '-i', str(path), '-o', str(output_path)]
-                format_label = 'CHD'
-            elif fmt == 'CSO':
-                output_path = path.with_suffix('.cso')
-                if output_path.exists():
-                    self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
-                    return True
-                # Use dynamic worker count for maxcso
-                workers = self.check_system_resources()
-                cmd = [self.maxcso_path, '--threads', str(workers), str(path), str(output_path)]
-                format_label = 'CSO'
-            elif fmt == 'ZSO':
-                output_path = path.with_suffix('.zso')
-                if output_path.exists():
-                    self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
-                    return True
-                # Use dynamic worker count for maxcso
-                workers = self.check_system_resources()
-                cmd = [self.maxcso_path, '--ziso', '--threads', str(workers), str(path), str(output_path)]
-                format_label = 'ZSO'
+            self.ensure_metadata_loaded()
+            # Determine if this is a PSP or PS2 ISO based on settings
+            iso_size = path.stat().st_size
+            system_guess = self.detect_iso_system(path.name, iso_size)
+            treat_psp = self.process_psp_isos.get() and (system_guess == 'PSP' or not self.process_ps2_isos.get())
+            
+            if treat_psp:
+                # PSP ISO conversion (CSO/ZSO only)
+                fmt = self.psp_output_format.upper()
+                if fmt == 'CSO':
+                    output_path = path.with_suffix('.cso')
+                    if output_path.exists():
+                        self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
+                        return True
+                    workers = self.check_system_resources()
+                    cmd = [self.maxcso_path, '--threads', str(workers), str(path), '-o', str(output_path)]
+                    format_label = 'CSO'
+                elif fmt == 'ZSO':
+                    output_path = path.with_suffix('.zso')
+                    if output_path.exists():
+                        self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
+                        return True
+                    workers = self.check_system_resources()
+                    cmd = [self.maxcso_path, '--zso', '--threads', str(workers), str(path), '-o', str(output_path)]
+                    format_label = 'ZSO'
+                else:
+                    self.log(f"  ❌ Unsupported PSP format: {fmt}")
+                    return False
+                label = 'PSP'
             else:
-                self.log(f"  ❌ Unsupported PS2 format: {fmt}")
-                return False
+                # PS2 ISO conversion (CHD/CSO/ZSO)
+                fmt = self.ps2_output_format.upper()
+                if fmt == 'CHD':
+                    output_path = path.with_suffix('.chd')
+                    if output_path.exists():
+                        self.log(f"  ⚠️  CHD already exists, skipping: {output_path.name}")
+                        return True
+                    cmd = [self.chdman_path, 'createdvd', '-i', str(path), '-o', str(output_path)]
+                    format_label = 'CHD'
+                elif fmt == 'CSO':
+                    output_path = path.with_suffix('.cso')
+                    if output_path.exists():
+                        self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
+                        return True
+                    workers = self.check_system_resources()
+                    cmd = [self.maxcso_path, '--threads', str(workers), str(path), '-o', str(output_path)]
+                    format_label = 'CSO'
+                elif fmt == 'ZSO':
+                    output_path = path.with_suffix('.zso')
+                    if output_path.exists():
+                        self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
+                        return True
+                    workers = self.check_system_resources()
+                    cmd = [self.maxcso_path, '--ziso', '--threads', str(workers), str(path), '-o', str(output_path)]
+                    format_label = 'ZSO'
+                else:
+                    self.log(f"  ❌ Unsupported PS2 format: {fmt}")
+                    return False
+                label = 'PS2'
 
-            original_size = path.stat().st_size
-            label = 'PS2'
+            original_size = iso_size
         else:
             self.log(f"  ❌ Unsupported file type: {path.name}")
             return False
@@ -2630,6 +4203,8 @@ Format Recommendations
         
         # Store files to rename
         files_to_rename = []
+        # Store rename history for undo (list of (new_path, original_path) tuples)
+        rename_history = []
         
         def get_clean_name(filename):
             """Clean a ROM filename by removing unwanted tags while preserving important ones."""
@@ -2813,7 +4388,7 @@ Format Recommendations
             
             # Scan for ROM files
             rom_extensions = {'.chd', '.cue', '.bin', '.iso', '.img', '.cso', '.zso', 
-                             '.gba', '.gbc', '.gb', '.nes', '.snes', '.sfc', '.smc',
+                             '.gba', '.gbc', '.gb', '.sgb', '.nes', '.snes', '.sfc', '.smc',
                              '.n64', '.z64', '.v64', '.nds', '.3ds', '.cia',
                              '.psx', '.pbp', '.gcm', '.gcz', '.rvz', '.wbfs', '.wad',
                              '.xci', '.nsp', '.xiso'}
@@ -2871,6 +4446,10 @@ Format Recommendations
             
             renamed_count = 0
             error_count = 0
+            error_files = []
+            
+            # Clear previous history and start fresh for this batch
+            rename_history.clear()
             
             results_text.delete("1.0", "end")
             results_text.insert("end", "Renaming files...\n\n")
@@ -2881,25 +4460,87 @@ Format Recommendations
                     
                     # Check if target already exists
                     if new_path.exists():
-                        results_text.insert("end", f"⚠️ SKIP (exists): {new_name}\n")
+                        results_text.insert("end", f"⚠️ SKIP (exists): {rom_file.name} → {new_name}\n")
+                        error_files.append((rom_file.name, "Target file already exists"))
                         error_count += 1
                         continue
                     
                     rom_file.rename(new_path)
+                    # Store for undo: (current_name, original_name)
+                    rename_history.append((new_path, rom_file))
                     results_text.insert("end", f"✅ {rom_file.name} → {new_name}\n")
                     renamed_count += 1
                     
                 except Exception as e:
-                    results_text.insert("end", f"❌ ERROR: {rom_file.name} - {e}\n")
+                    results_text.insert("end", f"❌ ERROR: {rom_file.name} → {new_name}\n   Reason: {e}\n")
+                    error_files.append((rom_file.name, str(e)))
                     error_count += 1
             
             results_text.insert("end", f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
             results_text.insert("end", f"✅ Renamed: {renamed_count}\n")
             if error_count > 0:
-                results_text.insert("end", f"❌ Errors: {error_count}\n")
+                results_text.insert("end", f"❌ Errors: {error_count}\n\n")
+                results_text.insert("end", "Files with errors:\n")
+                for filename, reason in error_files:
+                    results_text.insert("end", f"  • {filename}\n    → {reason}\n")
+            if renamed_count > 0:
+                results_text.insert("end", f"\n💡 Use UNDO to revert these changes.\n")
             
             files_to_rename.clear()
-            messagebox.showinfo("Complete", f"Renamed {renamed_count} file(s).")
+            messagebox.showinfo("Complete", f"Renamed {renamed_count} file(s)." + 
+                              (f"\n\n{error_count} file(s) had errors." if error_count > 0 else ""))
+        
+        def undo_rename():
+            """Undo the last batch of renames"""
+            if not rename_history:
+                messagebox.showwarning("Nothing to Undo", "No rename operations to undo.")
+                return
+            
+            confirm = messagebox.askyesno(
+                "Confirm Undo",
+                f"This will revert {len(rename_history)} file(s) to their original names.\n\n"
+                "Continue?"
+            )
+            
+            if not confirm:
+                return
+            
+            reverted_count = 0
+            error_count = 0
+            
+            results_text.delete("1.0", "end")
+            results_text.insert("end", "Undoing renames...\n\n")
+            
+            # Process in reverse order
+            for new_path, original_path in reversed(rename_history):
+                try:
+                    # Check if renamed file still exists
+                    if not new_path.exists():
+                        results_text.insert("end", f"⚠️ SKIP (not found): {new_path.name}\n")
+                        error_count += 1
+                        continue
+                    
+                    # Check if original name is now taken
+                    if original_path.exists():
+                        results_text.insert("end", f"⚠️ SKIP (conflict): {original_path.name} already exists\n")
+                        error_count += 1
+                        continue
+                    
+                    new_path.rename(original_path)
+                    results_text.insert("end", f"↩️ {new_path.name} → {original_path.name}\n")
+                    reverted_count += 1
+                    
+                except Exception as e:
+                    results_text.insert("end", f"❌ ERROR: {new_path.name} - {e}\n")
+                    error_count += 1
+            
+            results_text.insert("end", f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
+            results_text.insert("end", f"↩️ Reverted: {reverted_count}\n")
+            if error_count > 0:
+                results_text.insert("end", f"❌ Errors: {error_count}\n")
+            
+            rename_history.clear()
+            messagebox.showinfo("Undo Complete", f"Reverted {reverted_count} file(s) to original names.")
         
         # Action buttons
         action_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
@@ -2915,6 +4556,749 @@ Format Recommendations
                font=self.font_button,
                bg=COLORS['accent_pink'], fg="white",
                activebackground=COLORS['accent_purple'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="↩️ UNDO", command=undo_rename,
+               font=self.font_button,
+               bg=COLORS['accent_orange'], fg="white",
+               activebackground=COLORS['accent_yellow'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="✕ CLOSE", command=dialog.destroy,
+               font=self.font_button,
+               activebackground=COLORS['accent_red'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def extract_archives_dialog(self):
+        """Open dialog to scan archives, detect ROM systems, and extract to configured folders"""
+        dialog = Toplevel(self.master)
+        dialog.title("◄ EXTRACT ARCHIVES BY SYSTEM ►")
+        dialog.geometry("900x700")
+        dialog.resizable(True, True)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+        
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="📦 ARCHIVE EXTRACTOR - SORT BY SYSTEM", font=self.font_heading_md,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_light']).pack()
+        
+        # Source directory
+        source_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        source_frame.pack(fill="x")
+        
+        Label(source_frame, text="📂 Source:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left")
+        source_entry = Entry(source_frame, font=self.font_body,
+                            bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                            insertbackground=COLORS['text_primary'], relief="flat")
+        source_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
+        if self.source_dir:
+            source_entry.insert(0, self.source_dir)
+        
+        def browse_source():
+            folder = filedialog.askdirectory(title="Select Source Folder with Archives")
+            if folder:
+                source_entry.delete(0, "end")
+                source_entry.insert(0, folder)
+        
+        Button(source_frame, text="[ BROWSE ]", command=browse_source,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left")
+        
+        # Options
+        options_frame = Frame(dialog, padx=10, pady=8, bg=COLORS['bg_light'])
+        options_frame.pack(fill="x", padx=10, pady=5)
+        
+        cb_bg = COLORS['bg_light']
+        
+        recursive_scan = BooleanVar(value=True)
+        Checkbutton(options_frame, text="↳ Scan subdirectories", 
+                   variable=recursive_scan, font=self.font_small,
+                   fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left", padx=(0, 20))
+        
+        delete_after_extract = BooleanVar(value=False)
+        Checkbutton(options_frame, text="⚠ Delete archives after extraction", 
+                   variable=delete_after_extract, font=self.font_small,
+                   fg=COLORS['accent_red'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                   activebackground=cb_bg).pack(side="left")
+
+        copy_archives_var = BooleanVar(value=False)
+        Checkbutton(options_frame, text="📁 Copy archives instead of move", 
+               variable=copy_archives_var, font=self.font_small,
+               fg=COLORS['text_secondary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+               activebackground=cb_bg).pack(side="left", padx=(20, 0))
+        
+        # System folder configuration frame
+        system_config_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        system_config_frame.pack(fill="x")
+        
+        # Header with label and base folder button
+        system_header_frame = Frame(system_config_frame, bg=COLORS['bg_dark'])
+        system_header_frame.pack(fill="x", pady=(0, 4))
+        
+        Label(system_header_frame, text="◄ SYSTEM EXTRACTION FOLDERS ►", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(side="left")
+        
+        # Base folder for quick setup
+        base_folder_var = {"path": ""}
+        
+        def set_base_folder():
+            """Set a base folder and auto-create system subfolders"""
+            folder = filedialog.askdirectory(title="Select Base ROM Folder (subfolders will be created per system)")
+            if folder:
+                base_folder_var["path"] = folder
+                # Update all detected system entries with base_folder/SystemName
+                for system_name, entry in system_folder_entries.items():
+                    system_subfolder = os.path.join(folder, system_name.replace("/", "-").replace(" ", "_"))
+                    entry.delete(0, "end")
+                    entry.insert(0, system_subfolder)
+                    self.system_extract_dirs[system_name] = system_subfolder
+                self.save_config()
+                messagebox.showinfo("Base Folder Set", 
+                    f"All systems configured to extract to:\n{folder}/[SystemName]\n\n"
+                    "You can still edit individual paths if needed.")
+        
+        Button(system_header_frame, text="📁 SET BASE FOLDER (Auto-create subfolders)", 
+               command=set_base_folder,
+               font=self.font_small, bg=COLORS['accent_yellow'], fg=COLORS['bg_dark'],
+               relief="flat", cursor="hand2", padx=10).pack(side="right")
+        
+        # Scrollable frame for system folder configuration
+        system_canvas_frame = Frame(system_config_frame, bg=COLORS['bg_medium'], height=150)
+        system_canvas_frame.pack(fill="x", pady=5)
+        system_canvas_frame.pack_propagate(False)
+        
+        system_scrollbar = Scrollbar(system_canvas_frame, bg=COLORS['bg_light'],
+                                     troughcolor=COLORS['bg_dark'])
+        system_scrollbar.pack(side="right", fill="y")
+        
+        from tkinter import Canvas
+        system_canvas = Canvas(system_canvas_frame, bg=COLORS['bg_medium'],
+                              yscrollcommand=system_scrollbar.set, highlightthickness=0)
+        system_canvas.pack(side="left", fill="both", expand=True)
+        system_scrollbar.config(command=system_canvas.yview)
+        
+        system_list_frame = Frame(system_canvas, bg=COLORS['bg_medium'])
+        system_canvas.create_window((0, 0), window=system_list_frame, anchor="nw")
+        
+        def update_scroll_region(event=None):
+            system_canvas.configure(scrollregion=system_canvas.bbox("all"))
+        system_list_frame.bind("<Configure>", update_scroll_region)
+        
+        # Store system folder entries for easy access
+        system_folder_entries = {}
+        system_folder_labels = {}
+        system_checkboxes = {}  # Track which systems to extract
+        
+        def create_system_folder_row(parent, system_name, rom_count=0):
+            """Create a row for configuring a system's extraction folder"""
+            row_frame = Frame(parent, bg=COLORS['bg_medium'], pady=3)
+            row_frame.pack(fill="x", padx=5, pady=2)
+            
+            # Checkbox to include/exclude this system
+            include_var = BooleanVar(value=True)
+            system_checkboxes[system_name] = include_var
+            Checkbutton(row_frame, variable=include_var,
+                       bg=COLORS['bg_medium'], selectcolor=COLORS['bg_dark'],
+                       activebackground=COLORS['bg_medium']).pack(side="left")
+            
+            # System name with ROM count
+            Label(row_frame, text=f"{system_name} ({rom_count} ROMs):", width=25, anchor="w",
+                  font=self.font_small, fg=COLORS['text_primary'], 
+                  bg=COLORS['bg_medium']).pack(side="left")
+            
+            # Editable entry field for folder path
+            folder_entry = Entry(row_frame, font=self.font_small,
+                                bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                                insertbackground=COLORS['text_primary'], relief="flat", width=40)
+            folder_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=2)
+            
+            # Pre-fill with saved path if available
+            if system_name in self.system_extract_dirs:
+                folder_entry.insert(0, self.system_extract_dirs[system_name])
+            
+            system_folder_entries[system_name] = folder_entry
+            
+            def browse_system_folder():
+                folder = filedialog.askdirectory(title=f"Select folder for {system_name} ROMs")
+                if folder:
+                    folder_entry.delete(0, "end")
+                    folder_entry.insert(0, folder)
+                    self.system_extract_dirs[system_name] = folder
+                    self.save_config()
+            
+            Button(row_frame, text="📂", command=browse_system_folder,
+                   font=self.font_small, bg=COLORS['bg_light'],
+                   fg=COLORS['text_secondary'], relief="flat", cursor="hand2",
+                   width=3).pack(side="left", padx=2)
+            
+            def save_entry_path(event=None):
+                path = folder_entry.get().strip()
+                if path:
+                    self.system_extract_dirs[system_name] = path
+                elif system_name in self.system_extract_dirs:
+                    del self.system_extract_dirs[system_name]
+                self.save_config()
+            
+            folder_entry.bind("<FocusOut>", save_entry_path)
+            folder_entry.bind("<Return>", save_entry_path)
+        
+        # Placeholder text when no systems detected
+        placeholder_label = Label(system_list_frame, 
+                                 text="Scan archives to detect systems and configure extraction folders",
+                                 font=self.font_small, fg=COLORS['text_muted'],
+                                 bg=COLORS['bg_medium'], pady=20)
+        placeholder_label.pack()
+        
+        # Results area
+        results_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        results_frame.pack(fill="both", expand=True)
+        
+        Label(results_frame, text="◄ SCAN RESULTS ►", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(0, 4))
+        
+        list_frame = Frame(results_frame, bg=COLORS['bg_dark'])
+        list_frame.pack(fill="both", expand=True)
+        
+        scrollbar = Scrollbar(list_frame, bg=COLORS['bg_light'],
+                             troughcolor=COLORS['bg_dark'])
+        scrollbar.pack(side="right", fill="y")
+        
+        results_text = Text(list_frame, wrap="word", yscrollcommand=scrollbar.set,
+                           height=15, font=self.font_mono,
+                           bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                           insertbackground=COLORS['text_primary'], relief="flat",
+                           padx=8, pady=8)
+        results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=results_text.yview)
+        
+        # Store scan results
+        archives_by_system = {}  # {system_name: [(archive_path, [rom_files])]}
+        detected_systems = set()
+        
+        def detect_system_from_name(name, size_bytes=None):
+            """Detect system from filename, with metadata/size/ID heuristics for ISO (PS2 vs PSP)."""
+            file_ext = Path(name).suffix.lower()
+            if file_ext == '.iso':
+                system = self.detect_iso_system(name, size_bytes)
+                if system:
+                    return system
+            return SYSTEM_EXTENSIONS.get(file_ext)
+        
+        def scan_archive_contents(archive_path):
+            """Scan archive to detect ROM systems without extracting"""
+            archive_path = Path(archive_path)
+            ext = archive_path.suffix.lower()
+            systems_found = {}
+            
+            try:
+                if ext == '.zip':
+                    with zipfile.ZipFile(archive_path, 'r') as zf:
+                        for info in zf.infolist():
+                            system = detect_system_from_name(info.filename, info.file_size)
+                            if system:
+                                if system not in systems_found:
+                                    systems_found[system] = []
+                                systems_found[system].append(info.filename)
+                
+                elif ext in ['.tar', '.gz', '.tgz'] or archive_path.name.endswith('.tar.gz'):
+                    mode = 'r:gz' if ext in ['.gz', '.tgz'] or archive_path.name.endswith('.tar.gz') else 'r'
+                    with tarfile.open(archive_path, mode) as tf:
+                        for member in tf.getmembers():
+                            if member.isfile():
+                                system = detect_system_from_name(member.name, getattr(member, 'size', None))
+                                if system:
+                                    if system not in systems_found:
+                                        systems_found[system] = []
+                                    systems_found[system].append(member.name)
+                
+                elif ext in ['.7z', '.rar']:
+                    if self.seven_zip_path:
+                        # Use 7z to list archive contents
+                        cmd = [self.seven_zip_path, 'l', '-ba', str(archive_path)]
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                        if result.returncode == 0:
+                            for line in result.stdout.split('\n'):
+                                # 7z list output format varies, try to extract filename
+                                parts = line.strip().split()
+                                if parts:
+                                    name = parts[-1]  # Filename is usually last
+                                    size_val = None
+                                    if len(parts) >= 3 and parts[-3].isdigit():
+                                        size_val = int(parts[-3])
+                                    system = detect_system_from_name(name, size_val)
+                                    if system:
+                                        if system not in systems_found:
+                                            systems_found[system] = []
+                                        systems_found[system].append(name)
+            except Exception as e:
+                pass  # Silently fail for individual archives
+            
+            return systems_found
+        
+        def scan_archives():
+            """Scan all archives in source directory and detect ROM systems"""
+            source = source_entry.get()
+            if not source or not os.path.isdir(source):
+                messagebox.showwarning("Warning", "Please select a valid source folder")
+                return
+            
+            results_text.delete("1.0", "end")
+            archives_by_system.clear()
+            detected_systems.clear()
+            
+            # Clear previous system folder rows and checkboxes
+            for widget in system_list_frame.winfo_children():
+                widget.destroy()
+            system_folder_entries.clear()
+            system_checkboxes.clear()
+            
+            results_text.insert("end", "Scanning archives...\n\n")
+            dialog.update()
+            
+            # Load metadata DATs if available for better detection
+            self.ensure_metadata_loaded()
+            
+            # Find all compressed files
+            archives = self.find_compressed_files(source, recursive_scan.get())
+            
+            if not archives:
+                results_text.insert("end", "No archive files found in the selected directory.\n")
+                # Re-add placeholder
+                Label(system_list_frame, 
+                      text="No archives found. Select a different source folder.",
+                      font=self.font_small, fg=COLORS['text_muted'],
+                      bg=COLORS['bg_medium'], pady=20).pack()
+                return
+            
+            results_text.insert("end", f"Found {len(archives)} archive(s). Analyzing contents...\n\n")
+            dialog.update()
+            
+            total_roms = 0
+            for archive in archives:
+                systems_in_archive = scan_archive_contents(archive)
+                
+                for system, roms in systems_in_archive.items():
+                    detected_systems.add(system)
+                    if system not in archives_by_system:
+                        archives_by_system[system] = []
+                    archives_by_system[system].append((archive, roms))
+                    total_roms += len(roms)
+            
+            if not detected_systems:
+                results_text.insert("end", "No ROM files detected in archives.\n")
+                results_text.insert("end", "Archives may be empty or contain unsupported file types.\n")
+                # Re-add placeholder
+                Label(system_list_frame, 
+                      text="No ROMs detected. Archives may contain unsupported formats.",
+                      font=self.font_small, fg=COLORS['text_muted'],
+                      bg=COLORS['bg_medium'], pady=20).pack()
+                return
+            
+            # Create system folder configuration rows for detected systems with ROM counts
+            for system in sorted(detected_systems):
+                rom_count = sum(len(roms) for _, roms in archives_by_system.get(system, []))
+                create_system_folder_row(system_list_frame, system, rom_count)
+            
+            # Update scroll region
+            system_list_frame.update_idletasks()
+            system_canvas.configure(scrollregion=system_canvas.bbox("all"))
+            
+            # Display results organized by system
+            results_text.insert("end", f"{'━' * 60}\n")
+            results_text.insert("end", f"📊 SCAN SUMMARY\n")
+            results_text.insert("end", f"{'━' * 60}\n")
+            results_text.insert("end", f"   Systems Detected: {len(detected_systems)}\n")
+            results_text.insert("end", f"   Total ROM Files:  {total_roms}\n")
+            results_text.insert("end", f"   Archives Scanned: {len(archives)}\n")
+            results_text.insert("end", f"{'━' * 60}\n\n")
+            results_text.insert("end", "💡 Configure extraction folders above, then click EXTRACT BY SYSTEM\n\n")
+            
+            for system in sorted(archives_by_system.keys()):
+                archive_list = archives_by_system[system]
+                rom_count = sum(len(roms) for _, roms in archive_list)
+                config_status = "✅ CONFIGURED" if system in self.system_extract_dirs else "⚠️ SET FOLDER ABOVE"
+                dest_path = self.system_extract_dirs.get(system, "")
+                
+                results_text.insert("end", f"{'═' * 60}\n")
+                results_text.insert("end", f"🎮 {system.upper()}\n")
+                results_text.insert("end", f"{'═' * 60}\n")
+                results_text.insert("end", f"   Status: {config_status}\n")
+                if dest_path:
+                    results_text.insert("end", f"   Destination: {dest_path}\n")
+                results_text.insert("end", f"   ROMs: {rom_count} file(s) in {len(archive_list)} archive(s)\n")
+                results_text.insert("end", f"{'─' * 60}\n")
+                
+                for archive, roms in archive_list:
+                    results_text.insert("end", f"\n   📦 {archive.name}\n")
+                    results_text.insert("end", f"   {'─' * 40}\n")
+                    for rom in roms:
+                        results_text.insert("end", f"      • {Path(rom).name}\n")
+                
+                results_text.insert("end", "\n")
+        
+        def reassign_rom_dialog():
+            """Allow user to move detected ROMs to another system before extraction."""
+            if not archives_by_system:
+                messagebox.showinfo("No Data", "Please scan archives first.")
+                return
+            dialog.lift()
+            dialog.attributes('-topmost', True)
+            rom_query = simpledialog.askstring("Reassign ROM", "Enter part of the ROM filename to move:", parent=dialog)
+            if not rom_query:
+                dialog.attributes('-topmost', False)
+                return
+            dest_system = simpledialog.askstring(
+                "Target System",
+                "Enter target system name (existing or new):\n" +
+                ", ".join(sorted(detected_systems)) if detected_systems else "e.g., PlayStation 2 or PSP",
+                parent=dialog
+            )
+            dialog.attributes('-topmost', False)
+            if not dest_system:
+                return
+            dest_system = dest_system.strip()
+            moved_entries = []
+            for system, archive_list in list(archives_by_system.items()):
+                new_archive_list = []
+                for archive, roms in archive_list:
+                    moving = [r for r in roms if rom_query.lower() in r.lower()]
+                    staying = [r for r in roms if r not in moving]
+                    if moving:
+                        moved_entries.append((archive, moving))
+                    if staying:
+                        new_archive_list.append((archive, staying))
+                archives_by_system[system] = new_archive_list
+            if not moved_entries:
+                messagebox.showinfo("Not Found", f"No ROM matching '{rom_query}' was found.")
+                return
+            dest_list = archives_by_system.get(dest_system, [])
+            dest_list.extend(moved_entries)
+            archives_by_system[dest_system] = dest_list
+            detected_systems.add(dest_system)
+            moved_count = sum(len(m) for _, m in moved_entries)
+            results_text.insert("end", f"\n🔀 Moved {moved_count} ROM(s) to {dest_system} (query: {rom_query})\n")
+            results_text.see("end")
+
+        def organize_archives_to_folders():
+            """Move or copy archives into system-specific folders without extracting."""
+            if not archives_by_system:
+                messagebox.showwarning("Warning", "Please scan archives first")
+                return
+
+            # Persist any path edits from the UI
+            for system, entry in system_folder_entries.items():
+                path = entry.get().strip()
+                if path:
+                    self.system_extract_dirs[system] = path
+                elif system in self.system_extract_dirs:
+                    del self.system_extract_dirs[system]
+            self.save_config()
+
+            systems_to_process = []
+            systems_unchecked = []
+            systems_unconfigured = []
+
+            for system in detected_systems:
+                is_checked = system_checkboxes.get(system, BooleanVar(value=True)).get()
+                entry = system_folder_entries.get(system)
+                folder_path = entry.get().strip() if entry else self.system_extract_dirs.get(system, "")
+                has_folder = bool(folder_path)
+                if not is_checked:
+                    systems_unchecked.append(system)
+                elif not has_folder:
+                    systems_unconfigured.append(system)
+                else:
+                    systems_to_process.append((system, folder_path))
+
+            if not systems_to_process:
+                messagebox.showwarning(
+                    "Warning",
+                    "No systems selected for organization.\n\nCheck at least one system and configure its folder."
+                )
+                return
+
+            results_text.delete("1.0", "end")
+            action_word = "Copying" if copy_archives_var.get() else "Moving"
+            results_text.insert("end", f"{action_word} archives into system folders...\n\n")
+            dialog.update()
+
+            moved_count = 0
+            copied_count = 0
+            error_count = 0
+            skipped_archives = set()
+            routed_archives = {}
+
+            for system, folder_path in systems_to_process:
+                dest_folder = Path(folder_path)
+                archive_list = archives_by_system.get(system, [])
+
+                if not dest_folder.exists():
+                    try:
+                        dest_folder.mkdir(parents=True, exist_ok=True)
+                    except Exception as e:
+                        error_count += len(archive_list)
+                        results_text.insert("end", f"❌ Cannot create folder for {system}: {e}\n")
+                        continue
+
+                results_text.insert("end", f"\n🎮 {system} → {dest_folder}\n")
+                dialog.update()
+
+                for archive, roms in archive_list:
+                    archive_path = Path(archive)
+
+                    if archive_path in routed_archives:
+                        results_text.insert("end", f"   ↪️ {archive_path.name} already placed in {routed_archives[archive_path]}\n")
+                        continue
+
+                    target_path = dest_folder / archive_path.name
+                    final_target = target_path
+                    suffix = 1
+                    while final_target.exists():
+                        final_target = target_path.with_name(f"{target_path.stem} ({suffix}){target_path.suffix}")
+                        suffix += 1
+
+                    try:
+                        if copy_archives_var.get():
+                            shutil.copy2(archive_path, final_target)
+                            copied_count += 1
+                        else:
+                            shutil.move(str(archive_path), str(final_target))
+                            moved_count += 1
+                        routed_archives[archive_path] = final_target
+                        results_text.insert("end", f"   ✅ {archive_path.name} → {final_target}\n")
+                    except Exception as e:
+                        error_count += 1
+                        results_text.insert("end", f"   ❌ {archive_path.name}: {e}\n")
+
+                results_text.insert("end", "\n")
+                dialog.update()
+
+            if systems_unchecked:
+                skipped_archives.update({Path(a) for sys_name in systems_unchecked for a, _ in archives_by_system.get(sys_name, [])})
+            if systems_unconfigured:
+                skipped_archives.update({Path(a) for sys_name in systems_unconfigured for a, _ in archives_by_system.get(sys_name, [])})
+
+            results_text.insert("end", f"\n{'━' * 50}\n")
+            results_text.insert("end", f"✅ Moved: {moved_count}\n")
+            results_text.insert("end", f"✅ Copied: {copied_count}\n")
+            if skipped_archives:
+                results_text.insert("end", f"⏭️ Skipped: {len(skipped_archives)} archive(s) (unchecked or unconfigured)\n")
+            if error_count:
+                results_text.insert("end", f"❌ Errors: {error_count}\n")
+
+            messagebox.showinfo(
+                "Organization Complete",
+                f"Moved: {moved_count}\n" +
+                f"Copied: {copied_count}\n" +
+                (f"Skipped: {len(skipped_archives)}\n" if skipped_archives else "") +
+                (f"Errors: {error_count}" if error_count else "")
+            )
+        
+        def extract_to_system_folders():
+            """Extract archives to their configured system folders"""
+            if not archives_by_system:
+                messagebox.showwarning("Warning", "Please scan archives first")
+                return
+            
+            # Save any paths entered in the entry fields and build extraction map
+            extraction_paths = {}
+            for system, entry in system_folder_entries.items():
+                path = entry.get().strip()
+                if path:
+                    self.system_extract_dirs[system] = path
+                    extraction_paths[system] = path
+                elif system in self.system_extract_dirs:
+                    del self.system_extract_dirs[system]
+            self.save_config()
+            
+            # Get systems to extract (checked and configured)
+            systems_to_extract = []
+            systems_unchecked = []
+            systems_unconfigured = []
+            
+            for system in detected_systems:
+                is_checked = system_checkboxes.get(system, BooleanVar(value=True)).get()
+                # Check both the entry field directly and the saved config
+                entry_path = system_folder_entries.get(system)
+                has_folder = (entry_path and entry_path.get().strip()) or \
+                            (system in self.system_extract_dirs and self.system_extract_dirs[system].strip())
+                
+                if not is_checked:
+                    systems_unchecked.append(system)
+                elif not has_folder:
+                    systems_unconfigured.append(system)
+                else:
+                    systems_to_extract.append(system)
+            
+            if not systems_to_extract:
+                messagebox.showwarning("Warning", 
+                    "No systems selected for extraction.\n\n" +
+                    "Please check the systems you want to extract and ensure folders are configured.")
+                return
+            
+            # Warn about unconfigured systems
+            if systems_unconfigured:
+                proceed = messagebox.askyesno(
+                    "Unconfigured Systems",
+                    f"{len(systems_unconfigured)} checked system(s) don't have folders configured:\n" +
+                    "\n".join(f"  • {s}" for s in systems_unconfigured) +
+                    "\n\nThese will be skipped.\nContinue anyway?"
+                )
+                if not proceed:
+                    return
+            
+            results_text.delete("1.0", "end")
+            results_text.insert("end", "Extracting archives by system...\n\n")
+            dialog.update()
+            
+            extracted_count = 0
+            skipped_count = 0
+            error_count = 0
+            
+            for system, archive_list in archives_by_system.items():
+                # Check if system is selected and configured
+                is_checked = system_checkboxes.get(system, BooleanVar(value=True)).get()
+                
+                # Get folder path from entry field or saved config
+                entry = system_folder_entries.get(system)
+                folder_path = entry.get().strip() if entry else self.system_extract_dirs.get(system, "")
+                has_folder = bool(folder_path)
+                
+                if not is_checked:
+                    for archive, roms in archive_list:
+                        skipped_count += len(roms)
+                    results_text.insert("end", f"⏭️ Skipping {system} (unchecked)\n")
+                    continue
+                
+                if not has_folder:
+                    for archive, roms in archive_list:
+                        skipped_count += len(roms)
+                    results_text.insert("end", f"⏭️ Skipping {system} (no folder configured)\n")
+                    continue
+                
+                dest_folder = Path(folder_path)
+                if not dest_folder.exists():
+                    try:
+                        dest_folder.mkdir(parents=True, exist_ok=True)
+                    except Exception as e:
+                        results_text.insert("end", f"❌ Cannot create folder for {system}: {e}\n")
+                        error_count += 1
+                        continue
+                
+                results_text.insert("end", f"\n🎮 Extracting {system} ROMs to: {dest_folder}\n")
+                dialog.update()
+                
+                for archive, roms in archive_list:
+                    try:
+                        archive_path = Path(archive)
+                        ext = archive_path.suffix.lower()
+                        
+                        # Extract specific files based on archive type
+                        if ext == '.zip':
+                            with zipfile.ZipFile(archive_path, 'r') as zf:
+                                for rom in roms:
+                                    try:
+                                        zf.extract(rom, dest_folder)
+                                        extracted_count += 1
+                                        results_text.insert("end", f"   ✅ {Path(rom).name}\n")
+                                    except Exception as e:
+                                        results_text.insert("end", f"   ❌ {Path(rom).name}: {e}\n")
+                                        error_count += 1
+                        
+                        elif ext in ['.tar', '.gz', '.tgz'] or archive_path.name.endswith('.tar.gz'):
+                            mode = 'r:gz' if ext in ['.gz', '.tgz'] or archive_path.name.endswith('.tar.gz') else 'r'
+                            with tarfile.open(archive_path, mode) as tf:
+                                for rom in roms:
+                                    try:
+                                        member = tf.getmember(rom)
+                                        tf.extract(member, dest_folder)
+                                        extracted_count += 1
+                                        results_text.insert("end", f"   ✅ {Path(rom).name}\n")
+                                    except Exception as e:
+                                        results_text.insert("end", f"   ❌ {Path(rom).name}: {e}\n")
+                                        error_count += 1
+                        
+                        elif ext in ['.7z', '.rar'] and self.seven_zip_path:
+                            for rom in roms:
+                                try:
+                                    cmd = [self.seven_zip_path, 'e', str(archive_path), 
+                                           f'-o{dest_folder}', rom, '-y']
+                                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                                    if result.returncode == 0:
+                                        extracted_count += 1
+                                        results_text.insert("end", f"   ✅ {Path(rom).name}\n")
+                                    else:
+                                        results_text.insert("end", f"   ❌ {Path(rom).name}: 7z error\n")
+                                        error_count += 1
+                                except Exception as e:
+                                    results_text.insert("end", f"   ❌ {Path(rom).name}: {e}\n")
+                                    error_count += 1
+                        
+                        dialog.update()
+                        
+                    except Exception as e:
+                        results_text.insert("end", f"   ❌ Archive error: {archive.name}: {e}\n")
+                        error_count += 1
+            
+            # Delete archives if option is enabled
+            if delete_after_extract.get() and extracted_count > 0:
+                results_text.insert("end", f"\n{'━' * 50}\n")
+                results_text.insert("end", "Deleting extracted archives...\n")
+                deleted_archives = set()
+                for system, archive_list in archives_by_system.items():
+                    if system in self.system_extract_dirs:
+                        for archive, roms in archive_list:
+                            if archive not in deleted_archives:
+                                try:
+                                    archive.unlink()
+                                    results_text.insert("end", f"   🗑️ {archive.name}\n")
+                                    deleted_archives.add(archive)
+                                except Exception as e:
+                                    results_text.insert("end", f"   ⚠️ Could not delete {archive.name}: {e}\n")
+            
+            results_text.insert("end", f"\n{'━' * 50}\n")
+            results_text.insert("end", f"✅ Extracted: {extracted_count} ROM(s)\n")
+            if skipped_count > 0:
+                results_text.insert("end", f"⏭️ Skipped: {skipped_count} ROM(s) (no folder configured)\n")
+            if error_count > 0:
+                results_text.insert("end", f"❌ Errors: {error_count}\n")
+            
+            messagebox.showinfo("Extraction Complete", 
+                              f"Extracted {extracted_count} ROM(s)\n" +
+                              (f"Skipped {skipped_count} ROM(s)\n" if skipped_count > 0 else "") +
+                              (f"Errors: {error_count}" if error_count > 0 else ""))
+        
+        # Action buttons
+        action_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        action_frame.pack(fill="x")
+        
+        Button(action_frame, text="▶ SCAN ARCHIVES", command=scan_archives,
+               font=self.font_button,
+               bg=COLORS['button_green'], fg=COLORS['bg_dark'],
+               activebackground=COLORS['text_primary'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="🔀 REASSIGN ROM", command=reassign_rom_dialog,
+               font=self.font_button,
+               bg=COLORS['button_blue'], fg="white",
+               activebackground=COLORS['text_secondary'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="📁 ORGANIZE ARCHIVES", command=organize_archives_to_folders,
+               font=self.font_button,
+               bg=COLORS['accent_purple'], fg="white",
+               activebackground=COLORS['accent_pink'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
+        
+        Button(action_frame, text="📦 EXTRACT BY SYSTEM", command=extract_to_system_folders,
+               font=self.font_button,
+               bg=COLORS['accent_yellow'], fg=COLORS['bg_dark'],
+               activebackground=COLORS['accent_orange'],
                relief="flat", cursor="hand2", padx=15, pady=5).pack(side="left", padx=5)
         
         Button(action_frame, text="✕ CLOSE", command=dialog.destroy,

@@ -25,6 +25,12 @@ if not exist "rom_converter.py" (
     exit /b 1
 )
 
+REM Capture build timestamp for embedding into the binary
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -UFormat %%s"') do set BUILD_TIMESTAMP=%%i
+set RUNTIME_HOOK=build_timestamp_hook.py
+echo import os>"%RUNTIME_HOOK%"
+echo os.environ.setdefault("BUILD_TIMESTAMP","%BUILD_TIMESTAMP%")>>"%RUNTIME_HOOK%"
+
 REM Install PyInstaller if not present
 echo Checking for PyInstaller...
 python -m pip list | findstr pyinstaller >nul 2>&1
@@ -52,6 +58,7 @@ python -m PyInstaller ^
     --windowed ^
     --name=ROM_Converter ^
     --distpath=dist ^
+    --runtime-hook=%RUNTIME_HOOK% ^
     rom_converter.py
 
 if errorlevel 1 (
@@ -82,3 +89,6 @@ if exist dist\ROM_Converter.exe (
     pause
     exit /b 1
 )
+
+REM Clean up build-time hook
+if exist "%RUNTIME_HOOK%" del /q "%RUNTIME_HOOK%" >nul 2>&1

@@ -28,6 +28,11 @@ if (-not (Test-Path "rom_converter.py")) {
     exit 1
 }
 
+# Capture build timestamp for embedding into the binary
+$buildTimestamp = [int](Get-Date -UFormat %s)
+$runtimeHook = "build_timestamp_hook.py"
+Set-Content -Path $runtimeHook -Value "import os`nos.environ.setdefault(\"BUILD_TIMESTAMP\", \"$buildTimestamp\")" -NoNewline
+
 # Clean previous builds if requested
 if ($Clean) {
     Write-Host "Cleaning previous builds..."
@@ -61,6 +66,7 @@ $BuildArgs = @(
     "--windowed",
     "--name=ROM_Converter",
     "--distpath=dist",
+    "--runtime-hook=$runtimeHook",
     "rom_converter.py"
 )
 
@@ -124,6 +130,9 @@ if (Test-Path "dist\ROM_Converter.exe") {
     Write-Host "Build verification failed - ROM_Converter.exe not found" @Red
     exit 1
 }
+
+# Clean up build-time hook
+Remove-Item -Path $runtimeHook -Force -ErrorAction SilentlyContinue
 
 # Optional: Open build folder
 Write-Host "Opening dist folder..."

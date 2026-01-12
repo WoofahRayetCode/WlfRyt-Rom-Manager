@@ -136,5 +136,28 @@ Thumbs.db
 # Project-specific
 .rom_converter_config.json
 rom_converter.spec
+
+# Bundled binaries (Windows)
 chdman.exe
 maxcso.exe
+
+# Bundled binaries (Linux)
+chdman
+maxcso
+
+# AppImage build artifacts
+appimagetool-x86_64.AppImage
+*.AppImage
+*.AppDir/
+
+# Flatpak build artifacts
+flatpak-build/
+.flatpak-builder/
+*.flatpak
+
+# Temp directories
+mame_temp/
+
+# Build-time generated hooks
+.build_timestamp_hook.py
+build_timestamp_hook.py
