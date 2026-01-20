@@ -393,26 +393,54 @@ if [[ "$BUILD_APPIMAGE" == true ]]; then
     echo -e "${YELLOW}Building AppImage...${NC}"
     echo "======================================"
     
-    # Check for FUSE (required to run AppImages)
-    if ! command -v fusermount &> /dev/null && ! command -v fusermount3 &> /dev/null; then
-        echo -e "${YELLOW}Installing FUSE (required for AppImage)...${NC}"
-        sudo pacman -S --noconfirm --needed fuse2 || sudo pacman -S --noconfirm --needed fuse3 || {
-            echo -e "${YELLOW}Warning: Could not install FUSE automatically${NC}"
-            echo "Install manually: sudo pacman -S fuse2"
-        }
+    # Check for FUSE - can be on host, in DistroBox, or we use extract-and-run fallback
+    FUSE_AVAILABLE=false
+    DISTROBOX_CMD=""
+    
+    if command -v fusermount &> /dev/null || command -v fusermount3 &> /dev/null; then
+        FUSE_AVAILABLE=true
+        echo -e "${GREEN}FUSE available on host${NC}"
+    elif command -v distrobox &> /dev/null; then
+        # Check if there's a DistroBox with FUSE available
+        echo "Checking DistroBox for FUSE support..."
+        DISTROBOX_CONTAINERS=$(distrobox list --no-color 2>/dev/null | tail -n +2 | awk '{print $3}' | head -5)
+        for container in $DISTROBOX_CONTAINERS; do
+            if [[ -n "$container" ]]; then
+                if distrobox enter "$container" -- command -v fusermount &> /dev/null 2>&1 || \
+                   distrobox enter "$container" -- command -v fusermount3 &> /dev/null 2>&1; then
+                    FUSE_AVAILABLE=true
+                    DISTROBOX_CMD="distrobox enter $container --"
+                    echo -e "${GREEN}FUSE available in DistroBox: $container${NC}"
+                    break
+                fi
+            fi
+        done
+    fi
+    
+    if [[ "$FUSE_AVAILABLE" == false ]]; then
+        echo -e "${YELLOW}FUSE not found on host or in DistroBox - using extract-and-run fallback${NC}"
     fi
     
     # Check for appimagetool
     APPIMAGETOOL=""
+    APPIMAGETOOL_ARGS=""
     if command -v appimagetool &> /dev/null; then
         APPIMAGETOOL="appimagetool"
     elif [[ -f "./appimagetool-x86_64.AppImage" ]]; then
         APPIMAGETOOL="./appimagetool-x86_64.AppImage"
+        # Use extract-and-run if no FUSE available
+        if [[ "$FUSE_AVAILABLE" == false ]] || [[ -z "$DISTROBOX_CMD" ]]; then
+            APPIMAGETOOL_ARGS="--appimage-extract-and-run"
+        fi
     else
         echo "Downloading appimagetool..."
         curl -L -o appimagetool-x86_64.AppImage "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
         chmod +x appimagetool-x86_64.AppImage
         APPIMAGETOOL="./appimagetool-x86_64.AppImage"
+        # Use extract-and-run if no FUSE available
+        if [[ "$FUSE_AVAILABLE" == false ]] || [[ -z "$DISTROBOX_CMD" ]]; then
+            APPIMAGETOOL_ARGS="--appimage-extract-and-run"
+        fi
     fi
     
     # Require a built binary path
@@ -473,7 +501,18 @@ EOF
     chmod +x "$APPDIR/AppRun"
     
     # Build AppImage
-    ARCH=x86_64 $APPIMAGETOOL "$APPDIR" "dist/ROM_Converter-x86_64.AppImage"
+    # Use DistroBox if available and has FUSE, otherwise use extract-and-run fallback
+    APPDIR_ABS=$(realpath "$APPDIR")
+    DIST_ABS=$(realpath "dist")
+    
+    if [[ -n "$DISTROBOX_CMD" ]]; then
+        echo "Building AppImage via DistroBox..."
+        $DISTROBOX_CMD bash -c "cd '$(pwd)' && ARCH=x86_64 '$APPIMAGETOOL' '$APPDIR_ABS' '$DIST_ABS/ROM_Converter-x86_64.AppImage'"
+    elif [[ -n "$APPIMAGETOOL_ARGS" ]]; then
+        ARCH=x86_64 $APPIMAGETOOL $APPIMAGETOOL_ARGS "$APPDIR" "dist/ROM_Converter-x86_64.AppImage"
+    else
+        ARCH=x86_64 $APPIMAGETOOL "$APPDIR" "dist/ROM_Converter-x86_64.AppImage"
+    fi
     
     if [[ -f "dist/ROM_Converter-x86_64.AppImage" ]]; then
         chmod +x "dist/ROM_Converter-x86_64.AppImage"
