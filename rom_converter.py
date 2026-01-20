@@ -298,18 +298,28 @@ class ROMConverter:
         
         # Check for chdman
         if not self.check_chdman():
+            # Hide main window and force dialog to front on Linux
+            master.withdraw()
+            master.update()
+            
             # Offer to download MAME tools or manual selection
             response = messagebox.askyesnocancel(
                 "chdman Not Found",
                 "chdman not found!\n\n"
                 "Would you like to download MAME tools automatically?\n\n"
                 "Yes = Download from mamedev.org\n"
-                "No = Manually select chdman.exe\n"
+                "No = Manually select chdman.exe\n",
+                parent=master
             )
+            
+            # Show main window again
+            master.deiconify()
+            master.update()
+            
             if response is True:  # Yes - download
                 if self.download_mame_tools():
                     if not self.check_chdman():
-                        messagebox.showerror("Error", "Failed to find chdman after download")
+                        messagebox.showerror("Error", "Failed to find chdman after download", parent=master)
                         master.destroy()
                         return
                 else:
@@ -416,11 +426,16 @@ class ROMConverter:
             
             # Compare versions (they're 4-digit strings like "0283")
             if int(latest_version) > int(installed_version):
+                # Ensure dialog appears in front
+                self.master.lift()
+                self.master.focus_force()
                 response = messagebox.askyesno(
-            direct_maxcso = self.script_dir / "maxcso.exe"
+                    "chdman Update Available",
+                    f"A newer version of chdman is available!\n\n"
                     f"Installed: MAME {installed_version[0]}.{installed_version[1:]}\n"
                     f"Latest: MAME {latest_version[0]}.{latest_version[1:]}\n\n"
-                    "Would you like to update now?"
+                    "Would you like to update now?",
+                    parent=self.master
                 )
                 if response:
                     self.download_mame_tools()
@@ -466,7 +481,7 @@ class ROMConverter:
             # Get latest version
             version = self.get_latest_mame_version()
             if not version:
-                messagebox.showerror("Error", "Could not determine latest MAME version")
+                messagebox.showerror("Error", "Could not determine latest MAME version", parent=self.master)
                 return False
             
             # Construct download URL for Windows x64 binary
@@ -484,11 +499,15 @@ class ROMConverter:
             
             download_path = temp_dir / f"mame{version}.exe"
             
-            # Show progress dialog
-            progress_window = Tk()
+            # Show progress dialog - ensure it appears in front
+            progress_window = Toplevel(self.master)
             progress_window.title("Downloading MAME Tools")
             progress_window.geometry("400x150")
             progress_window.resizable(False, False)
+            progress_window.transient(self.master)
+            progress_window.grab_set()
+            progress_window.lift()
+            progress_window.focus_force()
             
             Label(progress_window, text=f"Downloading MAME {version} tools...", 
                   font=("Arial", 10)).pack(pady=10)
@@ -552,7 +571,7 @@ class ROMConverter:
             
             if not downloaded:
                 progress_window.destroy()
-                messagebox.showerror("Error", "Could not download MAME tools from any mirror")
+                messagebox.showerror("Error", "Could not download MAME tools from any mirror", parent=self.master)
                 return False
             
             # Extract using 7-Zip or the self-extracting exe
@@ -603,19 +622,20 @@ class ROMConverter:
             if extracted and (script_dir / "chdman.exe").exists():
                 self.chdman_path = str(script_dir / "chdman.exe")
                 self.save_config()
-                messagebox.showinfo("Success", f"chdman.exe downloaded successfully!\n\nLocation:\n{self.chdman_path}")
+                messagebox.showinfo("Success", f"chdman.exe downloaded successfully!\n\nLocation:\n{self.chdman_path}", parent=self.master)
                 return True
             else:
                 messagebox.showerror(
                     "Extraction Failed",
                     "Could not extract chdman.exe from MAME package.\n\n"
                     "Please install 7-Zip and try again, or manually download MAME from:\n"
-                    "https://www.mamedev.org/release.html"
+                    "https://www.mamedev.org/release.html",
+                    parent=self.master
                 )
                 return False
             
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to download MAME tools:\n{e}")
+            messagebox.showerror("Error", f"Failed to download MAME tools:\n{e}", parent=self.master)
             return False
     
     def download_mame_tools_linux(self):
@@ -630,13 +650,15 @@ class ROMConverter:
             script_dir = self.script_dir
             chdman_dest = script_dir / "chdman"
             
-            # Show progress dialog
-            progress_window = Toplevel()
+            # Show progress dialog - ensure it appears in front
+            progress_window = Toplevel(self.master)
             progress_window.title("Downloading chdman")
             progress_window.geometry("450x180")
             progress_window.resizable(False, False)
-            progress_window.transient()
+            progress_window.transient(self.master)
             progress_window.grab_set()
+            progress_window.lift()
+            progress_window.focus_force()
             
             Label(progress_window, text="Downloading chdman for Linux...", 
                   font=("Arial", 10)).pack(pady=10)
@@ -704,7 +726,7 @@ class ROMConverter:
             if downloaded and chdman_dest.exists():
                 self.chdman_path = str(chdman_dest)
                 self.save_config()
-                messagebox.showinfo("Success", f"chdman downloaded successfully!\n\nLocation:\n{self.chdman_path}")
+                messagebox.showinfo("Success", f"chdman downloaded successfully!\n\nLocation:\n{self.chdman_path}", parent=self.master)
                 return True
             else:
                 # Provide helpful instructions for SteamOS/Linux
@@ -718,12 +740,13 @@ class ROMConverter:
                     "For other Linux:\n"
                     "   sudo pacman -S mame-tools  (Arch)\n"
                     "   sudo apt install mame-tools  (Debian/Ubuntu)\n\n"
-                    "Then place 'chdman' next to this application."
+                    "Then place 'chdman' next to this application.",
+                    parent=self.master
                 )
                 return False
                 
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to download MAME tools:\n{e}")
+            messagebox.showerror("Error", f"Failed to download MAME tools:\n{e}", parent=self.master)
             return False
     
     def check_7zip(self):
