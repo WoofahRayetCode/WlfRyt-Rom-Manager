@@ -582,20 +582,63 @@ class ROMConverter:
             # We need 7-Zip to extract just chdman.exe, or run with specific args
             extracted = False
             
+            # Build list of all possible 7zip paths to try
+            seven_zip_paths = []
+            
+            # Re-check for 7-Zip in case it was installed after app startup
+            if not self.seven_zip_path:
+                self.check_7zip()
+            
+            # Add current path if set
             if self.seven_zip_path:
-                # Use 7-Zip to extract only chdman.exe directly to script directory
+                seven_zip_paths.append(self.seven_zip_path)
+            
+            # Add all fallback paths
+            fallback_paths = [
+                self.script_dir / "7za.exe",
+                r"C:\Program Files\7-Zip\7z.exe",
+                r"C:\Program Files (x86)\7-Zip\7z.exe",
+                r"C:\Program Files\PeaZip\res\bin\7z\7z.exe",
+                r"C:\Program Files (x86)\PeaZip\res\bin\7z\7z.exe",
+                r"C:\Program Files\PeaZip\res\bin\7z\x64\7z.exe",
+                r"C:\Program Files (x86)\PeaZip\res\bin\7z\x64\7z.exe",
+            ]
+            for path in fallback_paths:
+                path_str = str(path)
+                if path_str not in seven_zip_paths and os.path.exists(path_str):
+                    seven_zip_paths.append(path_str)
+            
+            # Also check PATH
+            seven_zip_in_path = shutil.which("7z")
+            if seven_zip_in_path and seven_zip_in_path not in seven_zip_paths:
+                seven_zip_paths.append(seven_zip_in_path)
+            
+            # Auto-download 7-Zip if no paths found
+            if not seven_zip_paths:
+                status_label.config(text="Downloading 7-Zip...")
+                progress_window.update()
+                if self.download_7zip():
+                    seven_zip_paths.append(self.seven_zip_path)
+            
+            # Try each 7zip path until one works
+            for sz_path in seven_zip_paths:
+                if extracted:
+                    break
                 try:
+                    status_label.config(text=f"Extracting with {Path(sz_path).name}...")
+                    progress_window.update()
                     cmd = [
-                        self.seven_zip_path, 'e', str(download_path),
-                        '-o' + str(script_dir),
+                        sz_path, 'e', str(download_path),
+                        '-o' + str(self.script_dir),
                         'chdman.exe',
                         '-y'
                     ]
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                    if result.returncode == 0 and (script_dir / "chdman.exe").exists():
+                    if result.returncode == 0 and (self.script_dir / "chdman.exe").exists():
                         extracted = True
+                        self.seven_zip_path = sz_path  # Remember working path
                 except Exception as e:
-                    print(f"7-Zip extraction error: {e}")
+                    print(f"7-Zip extraction error with {sz_path}: {e}")
             
             if not extracted:
                 # Try running as self-extracting archive with output directory
@@ -605,10 +648,14 @@ class ROMConverter:
                     # Move chdman.exe to script directory
                     temp_chdman = temp_dir / "chdman.exe"
                     if temp_chdman.exists():
-                        shutil.move(str(temp_chdman), str(script_dir / "chdman.exe"))
+                        shutil.move(str(temp_chdman), str(self.script_dir / "chdman.exe"))
                         extracted = True
                 except Exception as e:
                     print(f"Self-extraction error: {e}")
+            
+            # If still not extracted, let user choose an extractor
+            if not extracted:
+                extracted = self.prompt_user_select_extractor(download_path, self.script_dir)
             
             progress_window.destroy()
             
@@ -619,8 +666,8 @@ class ROMConverter:
                 except:
                     pass
             
-            if extracted and (script_dir / "chdman.exe").exists():
-                self.chdman_path = str(script_dir / "chdman.exe")
+            if extracted and (self.script_dir / "chdman.exe").exists():
+                self.chdman_path = str(self.script_dir / "chdman.exe")
                 self.save_config()
                 messagebox.showinfo("Success", f"chdman.exe downloaded successfully!\n\nLocation:\n{self.chdman_path}", parent=self.master)
                 return True
@@ -750,18 +797,37 @@ class ROMConverter:
             return False
     
     def check_7zip(self):
-        """Check if 7-Zip is available"""
+        """Check if 7-Zip is available (including PeaZip's bundled 7z)"""
         # Check common locations on Windows
         common_paths = [
             r"C:\Program Files\7-Zip\7z.exe",
             r"C:\Program Files (x86)\7-Zip\7z.exe",
+            # PeaZip bundles 7z.exe
+            r"C:\Program Files\PeaZip\res\bin\7z\7z.exe",
+            r"C:\Program Files (x86)\PeaZip\res\bin\7z\7z.exe",
         ]
         
-        # Check PATH first
+        # Check for our downloaded 7za.exe first
+        local_7za = self.script_dir / "7za.exe"
+        if local_7za.exists():
+            self.seven_zip_path = str(local_7za)
+            return True
+        
+        # Check PATH for 7z
         seven_zip = shutil.which("7z")
         if seven_zip:
             self.seven_zip_path = seven_zip
             return True
+        
+        # Check PATH for peazip (in case it's there)
+        peazip = shutil.which("peazip")
+        if peazip:
+            # PeaZip's 7z is relative to the peazip executable
+            peazip_dir = Path(peazip).parent
+            peazip_7z = peazip_dir / "res" / "bin" / "7z" / "7z.exe"
+            if peazip_7z.exists():
+                self.seven_zip_path = str(peazip_7z)
+                return True
         
         # Check common install locations
         for path in common_paths:
@@ -770,6 +836,201 @@ class ROMConverter:
                 return True
         
         return False
+
+    def download_7zip(self):
+        """Download and install 7-Zip portable for extraction"""
+        if sys.platform != "win32":
+            return False
+        
+        try:
+            script_dir = self.script_dir
+            temp_dir = script_dir / "temp_7zip"
+            temp_dir.mkdir(exist_ok=True)
+            
+            # First download 7zr.exe (minimal 7z extractor)
+            url_7zr = "https://www.7-zip.org/a/7zr.exe"
+            seven_zr_path = temp_dir / "7zr.exe"
+            
+            response = requests.get(url_7zr, timeout=30)
+            response.raise_for_status()
+            with open(seven_zr_path, 'wb') as f:
+                f.write(response.content)
+            
+            # Download 7-Zip Extra package (contains 7za.exe with full format support)
+            url_extra = "https://www.7-zip.org/a/7z2409-extra.7z"
+            extra_path = temp_dir / "7z-extra.7z"
+            
+            response = requests.get(url_extra, timeout=60)
+            response.raise_for_status()
+            with open(extra_path, 'wb') as f:
+                f.write(response.content)
+            
+            # Use 7zr.exe to extract 7za.exe from the extra package
+            cmd = [str(seven_zr_path), 'e', str(extra_path), '-o' + str(script_dir), '7za.exe', '-y']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            seven_zip_path = script_dir / "7za.exe"
+            if seven_zip_path.exists():
+                self.seven_zip_path = str(seven_zip_path)
+                self.save_config()
+                # Clean up temp files
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                return True
+            
+            # Fallback: just use 7zr.exe if extraction failed
+            fallback_path = script_dir / "7zr.exe"
+            shutil.copy(seven_zr_path, fallback_path)
+            if fallback_path.exists():
+                self.seven_zip_path = str(fallback_path)
+                self.save_config()
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                return True
+                
+        except Exception as e:
+            print(f"Failed to download 7-Zip: {e}")
+        
+        return False
+
+    def get_all_extractor_paths(self):
+        """Get all detected extractor paths on the system"""
+        extractors = []
+        
+        # All possible paths to check
+        possible_paths = [
+            (self.script_dir / "7za.exe", "7za.exe (Local)"),
+            (r"C:\Program Files\7-Zip\7z.exe", "7-Zip (Program Files)"),
+            (r"C:\Program Files (x86)\7-Zip\7z.exe", "7-Zip (Program Files x86)"),
+            (r"C:\Program Files\PeaZip\res\bin\7z\7z.exe", "PeaZip 7z"),
+            (r"C:\Program Files (x86)\PeaZip\res\bin\7z\7z.exe", "PeaZip 7z (x86)"),
+            (r"C:\Program Files\PeaZip\res\bin\7z\x64\7z.exe", "PeaZip 7z x64"),
+            (r"C:\Program Files (x86)\PeaZip\res\bin\7z\x64\7z.exe", "PeaZip 7z x64 (x86)"),
+        ]
+        
+        for path, name in possible_paths:
+            path_str = str(path)
+            if os.path.exists(path_str):
+                extractors.append((path_str, name))
+        
+        # Check PATH
+        seven_zip_in_path = shutil.which("7z")
+        if seven_zip_in_path:
+            extractors.append((seven_zip_in_path, f"7z (PATH: {seven_zip_in_path})"))
+        
+        return extractors
+
+    def prompt_user_select_extractor(self, archive_path, output_dir):
+        """Show dialog for user to select an extractor when automatic extraction fails"""
+        extractors = self.get_all_extractor_paths()
+        
+        if not extractors:
+            # No extractors found, offer to browse
+            result = messagebox.askyesno(
+                "No Extractor Found",
+                "No 7-Zip or compatible extractor was detected.\n\n"
+                "Would you like to browse for a 7z.exe manually?",
+                parent=self.master
+            )
+            if result:
+                filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
+                selected = filedialog.askopenfilename(
+                    title="Select 7z.exe or compatible extractor",
+                    filetypes=filetypes,
+                    parent=self.master
+                )
+                if selected:
+                    extractors = [(selected, "User selected")]
+        
+        if not extractors:
+            return False
+        
+        # Create selection dialog
+        dialog = Toplevel(self.master)
+        dialog.title("Select Extractor")
+        dialog.transient(self.master)
+        dialog.grab_set()
+        
+        # Center dialog
+        dialog.geometry("450x300")
+        dialog.resizable(False, False)
+        
+        Label(dialog, text="Automatic extraction failed.\nPlease select an extractor to try:",
+              font=("Consolas", 10)).pack(pady=10)
+        
+        # Listbox with extractors
+        listbox_frame = Frame(dialog)
+        listbox_frame.pack(fill="both", expand=True, padx=20, pady=5)
+        
+        scrollbar = Scrollbar(listbox_frame)
+        scrollbar.pack(side="right", fill="y")
+        
+        listbox = Listbox(listbox_frame, font=("Consolas", 9), yscrollcommand=scrollbar.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+        
+        for path, name in extractors:
+            listbox.insert("end", f"{name}")
+        
+        if extractors:
+            listbox.selection_set(0)
+        
+        result = {"extracted": False, "selected_path": None}
+        
+        def try_extract():
+            selection = listbox.curselection()
+            if not selection:
+                messagebox.showwarning("No Selection", "Please select an extractor.", parent=dialog)
+                return
+            
+            selected_path = extractors[selection[0]][0]
+            result["selected_path"] = selected_path
+            
+            try:
+                cmd = [selected_path, 'e', str(archive_path), '-o' + str(output_dir), 'chdman.exe', '-y']
+                proc_result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if proc_result.returncode == 0 and (output_dir / "chdman.exe").exists():
+                    result["extracted"] = True
+                    self.seven_zip_path = selected_path
+                    dialog.destroy()
+                else:
+                    messagebox.showerror(
+                        "Extraction Failed",
+                        f"Extraction failed with selected tool.\n\nError: {proc_result.stderr[:200] if proc_result.stderr else 'Unknown error'}",
+                        parent=dialog
+                    )
+            except Exception as e:
+                messagebox.showerror("Error", f"Extraction error: {e}", parent=dialog)
+        
+        def browse_custom():
+            filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
+            selected = filedialog.askopenfilename(
+                title="Select 7z.exe or compatible extractor",
+                filetypes=filetypes,
+                parent=dialog
+            )
+            if selected:
+                extractors.append((selected, f"Custom: {Path(selected).name}"))
+                listbox.insert("end", f"Custom: {Path(selected).name}")
+                listbox.selection_clear(0, "end")
+                listbox.selection_set("end")
+        
+        def cancel():
+            dialog.destroy()
+        
+        button_frame = Frame(dialog)
+        button_frame.pack(pady=10)
+        
+        Button(button_frame, text="Try Selected", command=try_extract, width=12).pack(side="left", padx=5)
+        Button(button_frame, text="Browse...", command=browse_custom, width=12).pack(side="left", padx=5)
+        Button(button_frame, text="Cancel", command=cancel, width=12).pack(side="left", padx=5)
+        
+        dialog.wait_window()
+        return result["extracted"]
 
     def check_maxcso(self):
         """Check if maxcso is available for CSO/ZSO output"""
@@ -2982,10 +3243,16 @@ obtained ROM files.
         # Sort for stable processing order
         return sorted(files)
     
-    def parse_cue_file(self, cue_path):
-        """Parse CUE file to find associated BIN files"""
+    def parse_cue_file(self, cue_path, auto_repair=True):
+        """Parse CUE file to find associated BIN files.
+        
+        If auto_repair is True, will attempt to fix CUE references to BIN files
+        that have been renamed (e.g., locale tags removed).
+        """
         bin_files = []
         cue_dir = cue_path.parent
+        cue_needs_repair = False
+        repairs = {}  # old_name -> new_name
         
         try:
             with open(cue_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -3000,7 +3267,62 @@ obtained ROM files.
                 if bin_path.exists():
                     bin_files.append(bin_path)
                 else:
-                    self.log(f"  WARNING: Referenced BIN file not found: {match}")
+                    # Try to find BIN file with cleaned name
+                    found_bin = None
+                    
+                    # Get base name without extension
+                    bin_stem = Path(match).stem
+                    
+                    # Try finding by partial match - look for BINs that might be the cleaned version
+                    # Extract track info if present
+                    track_match = re.search(r'(Track\s*\d+|\(Track\s*\d+\))', match, re.IGNORECASE)
+                    track_info = track_match.group(1) if track_match else None
+                    
+                    # Get the CUE file's base name (likely already cleaned)
+                    cue_base = cue_path.stem
+                    
+                    # Look for BIN files that match the CUE base name
+                    for existing_bin in cue_dir.glob("*.bin"):
+                        existing_stem = existing_bin.stem
+                        
+                        # Check if this BIN matches the CUE name pattern
+                        if track_info:
+                            # Multi-track: look for "CueName (Track N).bin" or "CueName Track N.bin"
+                            expected_patterns = [
+                                f"{cue_base} ({track_info})",
+                                f"{cue_base} {track_info}",
+                                f"{cue_base}({track_info})",
+                            ]
+                            for pattern in expected_patterns:
+                                if existing_stem.lower() == pattern.lower():
+                                    found_bin = existing_bin
+                                    break
+                        else:
+                            # Single track: look for "CueName.bin"
+                            if existing_stem.lower() == cue_base.lower():
+                                found_bin = existing_bin
+                                break
+                    
+                    if found_bin:
+                        bin_files.append(found_bin)
+                        repairs[match] = found_bin.name
+                        cue_needs_repair = True
+                        self.log(f"  INFO: Found renamed BIN: {match} → {found_bin.name}")
+                    else:
+                        self.log(f"  WARNING: Referenced BIN file not found: {match}")
+            
+            # Auto-repair CUE file if we found renamed BINs
+            if auto_repair and cue_needs_repair and repairs:
+                try:
+                    new_content = content
+                    for old_name, new_name in repairs.items():
+                        new_content = new_content.replace(f'"{old_name}"', f'"{new_name}"')
+                    
+                    with open(cue_path, 'w', encoding='utf-8') as f:
+                        f.write(new_content)
+                    self.log(f"  ✅ Auto-repaired CUE file references")
+                except Exception as e:
+                    self.log(f"  WARNING: Could not auto-repair CUE file: {e}")
         
         except Exception as e:
             self.log(f"  ERROR parsing CUE file: {e}")
@@ -4431,8 +4753,80 @@ obtained ROM files.
             
             results_text.insert("end", f"Found {len(rom_files)} ROM file(s)...\n\n")
             
+            # Group CUE files with their BIN files for coordinated renaming
+            cue_bin_groups = {}  # cue_path -> [bin_paths]
+            standalone_files = []
+            
+            for rom_file in rom_files:
+                if rom_file.suffix.lower() == '.cue':
+                    # Parse CUE to find its BIN files
+                    bin_files = []
+                    try:
+                        with open(rom_file, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        file_pattern = re.compile(r'FILE\s+"([^"]+)"\s+BINARY', re.IGNORECASE)
+                        matches = file_pattern.findall(content)
+                        for match in matches:
+                            bin_path = rom_file.parent / match
+                            if bin_path.exists():
+                                bin_files.append(bin_path)
+                    except:
+                        pass
+                    cue_bin_groups[rom_file] = bin_files
+                elif rom_file.suffix.lower() == '.bin':
+                    # Check if this BIN is already associated with a CUE
+                    # Will be handled via cue_bin_groups
+                    pass
+                else:
+                    standalone_files.append(rom_file)
+            
+            # Find orphan BIN files (not referenced by any CUE)
+            all_grouped_bins = set()
+            for bins in cue_bin_groups.values():
+                all_grouped_bins.update(bins)
+            
+            for rom_file in rom_files:
+                if rom_file.suffix.lower() == '.bin' and rom_file not in all_grouped_bins:
+                    standalone_files.append(rom_file)
+            
             changes_found = 0
-            for rom_file in sorted(rom_files):
+            
+            # Process CUE/BIN groups - rename CUE and its BINs together
+            for cue_file, bin_files in sorted(cue_bin_groups.items()):
+                original_cue_name = cue_file.name
+                clean_cue_name = get_clean_name(original_cue_name)
+                
+                if clean_cue_name != original_cue_name:
+                    changes_found += 1
+                    files_to_rename.append((cue_file, clean_cue_name))
+                    relative_path = cue_file.parent.relative_to(path) if cue_file.parent != path else Path('.')
+                    results_text.insert("end", f"📁 {relative_path}\n")
+                    results_text.insert("end", f"  ❌ {original_cue_name}\n")
+                    results_text.insert("end", f"  ✅ {clean_cue_name}\n")
+                    
+                    # Also rename associated BIN files to match
+                    clean_base = Path(clean_cue_name).stem
+                    for i, bin_file in enumerate(bin_files):
+                        original_bin_name = bin_file.name
+                        # Construct new BIN name based on clean CUE name
+                        if len(bin_files) == 1:
+                            new_bin_name = f"{clean_base}.bin"
+                        else:
+                            # Multi-track: preserve track numbering if present
+                            track_match = re.search(r'[\s\(\[]*(Track\s*\d+|T\d+|\d{2})[\s\)\]]*\.bin$', original_bin_name, re.IGNORECASE)
+                            if track_match:
+                                new_bin_name = f"{clean_base} ({track_match.group(1).strip()}).bin"
+                            else:
+                                new_bin_name = f"{clean_base} (Track {i+1}).bin"
+                        
+                        if new_bin_name != original_bin_name:
+                            files_to_rename.append((bin_file, new_bin_name))
+                            results_text.insert("end", f"    ❌ {original_bin_name}\n")
+                            results_text.insert("end", f"    ✅ {new_bin_name}\n")
+                    results_text.insert("end", "\n")
+            
+            # Process standalone files
+            for rom_file in sorted(standalone_files):
                 original_name = rom_file.name
                 clean_name = get_clean_name(original_name)
                 
@@ -4477,11 +4871,86 @@ obtained ROM files.
             results_text.delete("1.0", "end")
             results_text.insert("end", "Renaming files...\n\n")
             
+            # Separate CUE files from other files - process CUE files specially
+            cue_renames = []  # (cue_file, new_cue_name)
+            bin_renames = []  # (bin_file, new_bin_name)
+            other_renames = []
+            
             for rom_file, new_name in files_to_rename:
+                if rom_file.suffix.lower() == '.cue':
+                    cue_renames.append((rom_file, new_name))
+                elif rom_file.suffix.lower() == '.bin':
+                    bin_renames.append((rom_file, new_name))
+                else:
+                    other_renames.append((rom_file, new_name))
+            
+            # Build a mapping of old BIN names to new BIN names for CUE updates
+            bin_name_map = {bf.name: new_name for bf, new_name in bin_renames}
+            
+            # Process CUE files first - update contents BEFORE renaming BINs
+            for cue_file, new_cue_name in cue_renames:
+                try:
+                    new_cue_path = cue_file.parent / new_cue_name
+                    
+                    if new_cue_path.exists():
+                        results_text.insert("end", f"⚠️ SKIP (exists): {cue_file.name} → {new_cue_name}\n")
+                        error_files.append((cue_file.name, "Target file already exists"))
+                        error_count += 1
+                        continue
+                    
+                    # Read CUE file contents and update BIN references
+                    try:
+                        with open(cue_file, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # Update all BIN references
+                        for old_bin, new_bin in bin_name_map.items():
+                            content = content.replace(f'"{old_bin}"', f'"{new_bin}"')
+                            content = content.replace(f"'{old_bin}'", f"'{new_bin}'")
+                        
+                        # Write updated content
+                        with open(cue_file, 'w', encoding='utf-8') as f:
+                            f.write(content)
+                    except Exception as e:
+                        results_text.insert("end", f"  ⚠️ Could not update CUE contents: {e}\n")
+                    
+                    # Now rename the CUE file
+                    cue_file.rename(new_cue_path)
+                    rename_history.append((new_cue_path, cue_file))
+                    results_text.insert("end", f"✅ {cue_file.name} → {new_cue_name}\n")
+                    renamed_count += 1
+                    
+                except Exception as e:
+                    results_text.insert("end", f"❌ ERROR: {cue_file.name} → {new_cue_name}\n   Reason: {e}\n")
+                    error_files.append((cue_file.name, str(e)))
+                    error_count += 1
+            
+            # Process BIN files
+            for bin_file, new_bin_name in bin_renames:
+                try:
+                    new_path = bin_file.parent / new_bin_name
+                    
+                    if new_path.exists():
+                        results_text.insert("end", f"⚠️ SKIP (exists): {bin_file.name} → {new_bin_name}\n")
+                        error_files.append((bin_file.name, "Target file already exists"))
+                        error_count += 1
+                        continue
+                    
+                    bin_file.rename(new_path)
+                    rename_history.append((new_path, bin_file))
+                    results_text.insert("end", f"✅ {bin_file.name} → {new_bin_name}\n")
+                    renamed_count += 1
+                    
+                except Exception as e:
+                    results_text.insert("end", f"❌ ERROR: {bin_file.name} → {new_bin_name}\n   Reason: {e}\n")
+                    error_files.append((bin_file.name, str(e)))
+                    error_count += 1
+            
+            # Process other files
+            for rom_file, new_name in other_renames:
                 try:
                     new_path = rom_file.parent / new_name
                     
-                    # Check if target already exists
                     if new_path.exists():
                         results_text.insert("end", f"⚠️ SKIP (exists): {rom_file.name} → {new_name}\n")
                         error_files.append((rom_file.name, "Target file already exists"))
@@ -4489,7 +4958,6 @@ obtained ROM files.
                         continue
                     
                     rom_file.rename(new_path)
-                    # Store for undo: (current_name, original_name)
                     rename_history.append((new_path, rom_file))
                     results_text.insert("end", f"✅ {rom_file.name} → {new_name}\n")
                     renamed_count += 1
