@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 import time
 import threading as pythread
+import gc  # For memory management
 try:
     import psutil  # For CPU, memory, disk usage
     PSUTIL_AVAILABLE = True
@@ -218,12 +219,6 @@ class ROMConverter:
             Path.home() / ".rom_converter_config.json"
         ]
         self.config_file = next((p for p in self.config_candidates if p.exists()), self.config_candidates[0])
-        self.metadata_dir = self.script_dir / "metadata_cache"
-        self.metadata_sources = {
-            'PlayStation 2': "https://archive.org/download/redump_ps2/redump_ps2.dat",
-            'PSP': "https://archive.org/download/redump_psp/redump_psp.dat"
-        }
-        self.metadata_index = {}  # lower filename -> {'system': ..., 'size': int, 'title': ...}
         
         # Variables
         self.source_dir = ""
@@ -235,7 +230,9 @@ class ROMConverter:
         total_cores = multiprocessing.cpu_count()
         self.cpu_cores = max(1, total_cores - 1)
         self.max_workers = self.cpu_cores  # Dynamic worker count
+        self.max_concurrent_conversions = self._detect_optimal_workers()  # Auto-detect based on system specs
         self.ram_threshold_percent = 90  # Throttle if RAM usage exceeds this
+        self.ram_critical_percent = 95  # Pause new conversions if RAM exceeds this
         self.cpu_threshold_percent = 95  # Throttle if CPU usage exceeds this
         self.log_queue = Queue()
         self.total_original_size = 0
@@ -274,6 +271,7 @@ class ROMConverter:
         self.last_disk_write_bytes = 0
         self.metrics_running = False
         self.metrics_lock = pythread.Lock()
+        self.last_ui_update = 0  # Throttle UI updates
         self.chdman_path = None  # Will store path to chdman executable
         self.build_timestamp = self.get_build_timestamp()
         
@@ -2339,6 +2337,7 @@ obtained ROM files.
                 'ps2_output_format': self.ps2_output_format,
                 'psp_output_format': self.psp_output_format,
                 'ps2_emulator': self.ps2_emulator,
+                'max_concurrent_conversions': self.max_concurrent_conversions,
                 'theme': self.current_theme,
                 'system_extract_dirs': {k: self._make_portable_path(v) for k, v in self.system_extract_dirs.items()},
                 # 3DS workflow settings
@@ -2376,6 +2375,7 @@ obtained ROM files.
                 self.ps2_output_format = config.get('ps2_output_format', 'CHD')
                 self.psp_output_format = config.get('psp_output_format', 'CSO')
                 self.ps2_emulator = config.get('ps2_emulator', 'PCSX2')
+                self.max_concurrent_conversions = config.get('max_concurrent_conversions', self._detect_optimal_workers())
                 self.current_theme = config.get('theme', 'PS2')
                 
                 # Restore chdman path if saved and still exists
@@ -2454,90 +2454,51 @@ obtained ROM files.
         except Exception:
             pass
     
-    def ensure_metadata_loaded(self):
-        """Ensure metadata DAT files are present and parsed."""
-        if self.metadata_index:
-            return
-        try:
-            self.metadata_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+    def detect_iso_system(self, name, size_bytes=None, full_path=None):
+        """Determine whether an ISO is PS2 or PSP using IDs, folder path, and size.
         
-        for system, url in self.metadata_sources.items():
-            dat_path = self.metadata_dir / f"{system.replace(' ', '_').lower()}.dat"
-            if not dat_path.exists():
-                try:
-                    self.log(f"⬇️  Downloading {system} metadata DAT...")
-                    urllib.request.urlretrieve(url, dat_path)
-                    self.log(f"✅ Saved: {dat_path.name}")
-                except Exception as e:
-                    self.log(f"⚠️  Could not download {system} DAT: {e}")
-                    continue
-            self.parse_dat_file(dat_path, system)
-    
-    def parse_dat_file(self, dat_path, system_name):
-        """Parse a clrmamepro DAT and populate metadata index."""
-        try:
-            if dat_path.suffix.lower() == '.gz':
-                with gzip.open(dat_path, 'rt', encoding='utf-8', errors='ignore') as f:
-                    data = f.read()
-            else:
-                with open(dat_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    data = f.read()
-            if not data:
-                return
-            root = ET.fromstring(data)
-            for game in root.findall('.//game'):
-                rom = game.find('rom')
-                if rom is None:
-                    continue
-                name = rom.attrib.get('name', '').strip()
-                if not name:
-                    continue
-                size = rom.attrib.get('size')
-                size_val = int(size) if size and size.isdigit() else None
-                title = game.findtext('description') or game.attrib.get('name', '')
-                key = name.lower()
-                if key not in self.metadata_index:
-                    self.metadata_index[key] = {'system': system_name, 'size': size_val, 'title': title}
-        except Exception as e:
-            self.log(f"⚠️  Failed to parse {dat_path.name}: {e}")
-    
-    def lookup_metadata(self, filename, size_bytes=None):
-        """Lookup system via metadata index using filename and optional size."""
-        key = Path(filename).name.lower()
-        info = self.metadata_index.get(key)
-        if info and info.get('size') and size_bytes:
-            expected = info['size']
-            if expected and abs(expected - size_bytes) > max(expected * 0.05, 2 * 1024 * 1024):
-                return None
-        return info
-    
-    def detect_iso_system(self, name, size_bytes=None):
-        """Determine whether an ISO is PS2 or PSP using metadata, IDs, and size."""
-        info = self.lookup_metadata(name, size_bytes)
-        if info and info.get('system'):
-            return info['system']
+        Args:
+            name: Filename of the ISO
+            size_bytes: Optional file size in bytes
+            full_path: Optional full path for folder-based detection
         
+        Returns:
+            'PSP', 'PlayStation 2', or None if uncertain
+        """
         lower_name = str(name).lower()
+        
+        # Check for game ID patterns in filename (very reliable)
         if any(token in lower_name for token in PSP_ID_PATTERNS):
             return 'PSP'
         if any(token in lower_name for token in PS2_ID_PATTERNS):
             return 'PlayStation 2'
         
-        path_parts = re.split(r'[\\/]', lower_name)
-        if any('psp' in part for part in path_parts):
-            return 'PSP'
-        if any('ps2' in part or 'playstation 2' in part for part in path_parts):
-            return 'PlayStation 2'
+        # Check folder path for system hints (use full path if available)
+        path_to_check = str(full_path).lower() if full_path else lower_name
+        path_parts = re.split(r'[\\/]', path_to_check)
         
+        # Check each folder part for system names
+        for part in path_parts:
+            part_clean = part.strip()
+            # PSP folder detection
+            if part_clean == 'psp' or 'playstation portable' in part_clean:
+                return 'PSP'
+            # PS2 folder detection - be more specific to avoid false matches
+            if part_clean == 'ps2' or part_clean == 'playstation 2' or part_clean == 'playstation2' or 'sony playstation 2' in part_clean:
+                return 'PlayStation 2'
+        
+        # Size-based heuristic as last resort (less reliable)
+        # Only use if size is significantly indicative
         if size_bytes is not None:
             size_gb = size_bytes / (1024 * 1024 * 1024)
-            if size_gb >= 2.0:
+            # PS2 DVDs are typically 4.7GB or larger, PSP UMDs max at ~1.8GB
+            if size_gb >= 3.0:
                 return 'PlayStation 2'
-            if size_gb <= 1.9:
+            # Very small ISOs (under 500MB) are more likely PSP
+            if size_gb <= 0.5:
                 return 'PSP'
         
+        # If we can't determine, return None - let user settings decide
         return None
 
     def _make_portable_path(self, path_value):
@@ -2932,6 +2893,23 @@ obtained ROM files.
                 fg=COLORS['accent_red'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
                 activebackground=cb_bg, activeforeground=COLORS['accent_red']).pack(anchor="w")
         
+        # Max concurrent conversions slider
+        concurrent_frame = Frame(options_frame, bg=cb_bg)
+        concurrent_frame.pack(fill="x", pady=(8, 4))
+        Label(concurrent_frame, text="⚡ Max concurrent conversions:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
+        self.concurrent_label = Label(concurrent_frame, text=str(self.max_concurrent_conversions), 
+                                       font=self.font_label_bold, fg=COLORS['accent_yellow'], bg=cb_bg, width=3)
+        self.concurrent_label.pack(side="left", padx=(8, 0))
+        max_cores = multiprocessing.cpu_count()
+        self.concurrent_slider = ttk.Scale(concurrent_frame, from_=1, to=max_cores, 
+                                            orient="horizontal", length=150,
+                                            command=self.on_concurrent_change)
+        self.concurrent_slider.set(self.max_concurrent_conversions)
+        self.concurrent_slider.pack(side="left", padx=(8, 0))
+        Label(concurrent_frame, text=f"(1-{max_cores} cores)", font=cb_font,
+              fg=COLORS['text_muted'], bg=cb_bg).pack(side="left", padx=(8, 0))
+        
         # Action buttons
         button_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
         button_frame.pack(fill="x", pady=(0, 8))
@@ -3087,16 +3065,42 @@ obtained ROM files.
         self.log_queue.put(message)
     
     def process_log_queue(self):
-        """Process queued log messages from threads"""
+        """Process queued log messages from threads - batched for performance"""
         try:
-            while True:
-                message = self.log_queue.get_nowait()
-                self.log_text.insert("end", message + "\n")
+            messages = []
+            # Batch up to 20 messages at once to reduce UI updates
+            for _ in range(20):
+                try:
+                    message = self.log_queue.get_nowait()
+                    messages.append(message)
+                except:
+                    break
+            
+            if messages:
+                # Insert all messages at once
+                self.log_text.insert("end", "\n".join(messages) + "\n")
                 self.log_text.see("end")
+                # Force UI update only once per batch
+                self.log_text.update_idletasks()
         except:
             pass
         finally:
-            self.master.after(100, self.process_log_queue)
+            # Check less frequently when idle (200ms), more often when busy (50ms)
+            interval = 50 if self.is_converting else 200
+            self.master.after(interval, self.process_log_queue)
+    
+    def keep_ui_responsive(self):
+        """Call periodically during long operations to keep UI responsive.
+        
+        Throttled to avoid excessive updates.
+        """
+        current_time = time.time()
+        if current_time - self.last_ui_update >= 0.1:  # Max 10 updates per second
+            try:
+                self.master.update_idletasks()
+                self.last_ui_update = current_time
+            except:
+                pass
     
     def find_cue_files(self, directory, recursive=True):
         """Find all .cue files in directory"""
@@ -3127,6 +3131,9 @@ obtained ROM files.
         """Extract a compressed archive to a folder with the same name"""
         archive_path = Path(archive_path)
         
+        # Wait for memory pressure before extraction
+        self._wait_for_memory_pressure()
+        
         # Create extraction folder (same name as archive without extension)
         extract_folder = archive_path.parent / archive_path.stem
         
@@ -3144,6 +3151,7 @@ obtained ROM files.
                 with zipfile.ZipFile(archive_path, 'r') as zip_ref:
                     zip_ref.extractall(extract_folder)
                 self.log(f"  ✅ Extracted to: {extract_folder.name}/")
+                gc.collect()  # Free memory after extraction
                 return True, extract_folder
             
             # Handle .tar, .tar.gz, .tgz files using Python's tarfile
@@ -3153,6 +3161,7 @@ obtained ROM files.
                 with tarfile.open(archive_path, mode) as tar_ref:
                     tar_ref.extractall(extract_folder)
                 self.log(f"  ✅ Extracted to: {extract_folder.name}/")
+                gc.collect()  # Free memory after extraction
                 return True, extract_folder
             
             # Handle .7z and .rar files using 7-Zip
@@ -3163,10 +3172,23 @@ obtained ROM files.
                 
                 self.log(f"  📦 Extracting with 7-Zip: {archive_path.name}")
                 cmd = [self.seven_zip_path, 'x', str(archive_path), f'-o{extract_folder}', '-y']
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+                
+                # Use lower process priority to reduce system impact
+                creationflags = 0
+                if sys.platform == 'win32':
+                    creationflags = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+                
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=3600,
+                    creationflags=creationflags if sys.platform == 'win32' else 0
+                )
                 
                 if result.returncode == 0:
                     self.log(f"  ✅ Extracted to: {extract_folder.name}/")
+                    gc.collect()  # Free memory after extraction
                     return True, extract_folder
                 else:
                     self.log(f"  ❌ 7-Zip extraction failed: {result.stderr.strip()}")
@@ -3335,12 +3357,12 @@ obtained ROM files.
             messagebox.showwarning("Warning", "Please select a valid directory")
             return
         
-        # Prepare metadata for better ISO detection
-        self.ensure_metadata_loaded()
-        
         self.log("\n" + "="*60)
         self.log("SCANNING FOR GAME FILES...")
         self.log("="*60)
+        
+        # Keep UI responsive during scan
+        self.keep_ui_responsive()
         
         # First, check for compressed files
         compressed_count = 0
@@ -3355,6 +3377,9 @@ obtained ROM files.
                     compressed_size += cf.stat().st_size
                     self.log(f"   - {cf.name} ({size_mb:.1f} MB)")
                 self.log("\n⚠️  Compressed files will be extracted when you click 'Start Conversion'.")
+        
+        # Keep UI responsive
+        self.keep_ui_responsive()
 
         game_files = self.find_game_files(self.source_dir, self.recursive.get())
 
@@ -3470,11 +3495,35 @@ obtained ROM files.
             label = 'CD (CUE)'
             format_label = 'CHD'
         elif ext == '.iso':
-            self.ensure_metadata_loaded()
-            # Determine if this is a PSP or PS2 ISO based on settings
+            # Determine if this is a PSP or PS2 ISO based on detection and settings
             iso_size = path.stat().st_size
-            system_guess = self.detect_iso_system(path.name, iso_size)
-            treat_psp = self.process_psp_isos.get() and (system_guess == 'PSP' or not self.process_ps2_isos.get())
+            system_guess = self.detect_iso_system(path.name, iso_size, full_path=path)
+            
+            # Respect user settings - if only one system is enabled, use that
+            psp_enabled = self.process_psp_isos.get()
+            ps2_enabled = self.process_ps2_isos.get()
+            
+            # Determine which system to treat this as
+            if psp_enabled and not ps2_enabled:
+                # Only PSP enabled - treat all ISOs as PSP
+                treat_psp = True
+            elif ps2_enabled and not psp_enabled:
+                # Only PS2 enabled - treat all ISOs as PS2
+                treat_psp = False
+            elif psp_enabled and ps2_enabled:
+                # Both enabled - use detection result
+                if system_guess == 'PSP':
+                    treat_psp = True
+                elif system_guess == 'PlayStation 2':
+                    treat_psp = False
+                else:
+                    # Uncertain - log warning and default to PS2 (more common for large ISOs)
+                    self.log(f"  ⚠️  Could not determine system for {path.name}, defaulting to PS2")
+                    treat_psp = False
+            else:
+                # Neither enabled - shouldn't happen but handle gracefully
+                self.log(f"  ❌ No ISO processing enabled for: {path.name}")
+                return False
             
             if treat_psp:
                 # PSP ISO conversion (CSO/ZSO only)
@@ -3537,7 +3586,20 @@ obtained ROM files.
 
         try:
             self.log(f"  Converting ({label} → {format_label}): {path.name} -> {output_path.name}")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+            
+            # Use lower process priority to reduce system impact
+            creationflags = 0
+            if sys.platform == 'win32':
+                # BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+                creationflags = 0x00004000
+            
+            result = subprocess.run(
+                cmd, 
+                capture_output=True, 
+                text=True, 
+                timeout=1800,
+                creationflags=creationflags if sys.platform == 'win32' else 0
+            )
 
             if result.returncode == 0 and output_path.exists():
                 new_size = output_path.stat().st_size
@@ -3629,12 +3691,19 @@ obtained ROM files.
         """Process a single CUE file (for parallel execution)"""
         if not self.is_converting:
             return None
+        
+        # Wait if memory pressure is too high (prevents system freeze)
+        self._wait_for_memory_pressure()
+        
         # Record start time for metrics
         with self.metrics_lock:
             self.file_start_times[cue_file] = time.time()
         self.log(f"\n[{file_num}/{total}] Processing: {cue_file.name}")
         
         success = self.convert_game(cue_file)
+        
+        # Force garbage collection after each conversion to free memory
+        gc.collect()
         
         if success:
             if self.delete_originals.get():
@@ -3643,6 +3712,42 @@ obtained ROM files.
                 self.move_to_backup_folder(cue_file)
         
         return success
+    
+    def _wait_for_memory_pressure(self, max_wait=60):
+        """Wait if RAM usage is critically high to prevent system freeze.
+        
+        Args:
+            max_wait: Maximum seconds to wait before proceeding anyway
+        """
+        if not PSUTIL_AVAILABLE:
+            return
+        
+        waited = 0
+        wait_interval = 2.0  # Check every 2 seconds
+        logged_warning = False
+        
+        while waited < max_wait and self.is_converting:
+            try:
+                mem = psutil.virtual_memory()
+                if mem.percent < self.ram_critical_percent:
+                    if logged_warning:
+                        self.log(f"  ✅ Memory pressure relieved ({mem.percent:.1f}%), resuming...")
+                    return
+                
+                if not logged_warning:
+                    self.log(f"  ⏸️  Pausing - RAM usage critical ({mem.percent:.1f}%), waiting for memory...")
+                    logged_warning = True
+                
+                # Force garbage collection to try to free memory
+                gc.collect()
+                
+                time.sleep(wait_interval)
+                waited += wait_interval
+            except Exception:
+                return
+        
+        if logged_warning:
+            self.log(f"  ⚠️  Max wait time reached, proceeding anyway...")
     
     def check_system_resources(self):
         """Check system resources and return recommended worker count"""
@@ -3670,6 +3775,41 @@ obtained ROM files.
             
         except Exception:
             return self.cpu_cores
+    
+    def _detect_optimal_workers(self):
+        """Detect optimal number of concurrent conversions based on system specs.
+        
+        Heuristics:
+        - 1 worker per 4GB of RAM (conversions are memory-intensive)
+        - Cap at (CPU cores - 1) to keep system responsive
+        - Minimum of 1, maximum of 8 (diminishing returns beyond this)
+        """
+        total_cores = multiprocessing.cpu_count()
+        max_by_cpu = max(1, total_cores - 1)
+        
+        if PSUTIL_AVAILABLE:
+            try:
+                # Get total RAM in GB
+                total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+                
+                # 1 worker per 4GB RAM is safe for heavy conversion tasks
+                max_by_ram = max(1, int(total_ram_gb / 4))
+                
+                # Use the more conservative of CPU or RAM limits
+                optimal = min(max_by_cpu, max_by_ram)
+                
+                # Cap at 8 (diminishing returns and prevents runaway on high-end systems)
+                return min(optimal, 8)
+            except Exception:
+                pass
+        
+        # Fallback: conservative default based on CPU cores only
+        if total_cores >= 8:
+            return 4
+        elif total_cores >= 4:
+            return 2
+        else:
+            return 1
     
     def conversion_thread(self):
         """Run conversion in separate thread with parallel processing"""
@@ -3734,10 +3874,14 @@ obtained ROM files.
         failed = 0
         completed = 0
         
-        # Dynamic resource management - adjust workers based on system load
-        self.max_workers = self.check_system_resources()
+        # Dynamic resource management - adjust workers based on system load and user limit
+        resource_limit = self.check_system_resources()
+        self.max_workers = min(self.max_concurrent_conversions, resource_limit)
         if self.max_workers < self.cpu_cores:
-            self.log(f"⚠️  System load detected - using {self.max_workers} workers (throttled)")
+            if resource_limit < self.max_concurrent_conversions:
+                self.log(f"⚠️  System load detected - using {self.max_workers} workers (throttled)")
+            else:
+                self.log(f"🔧 Using {self.max_workers} concurrent conversion(s) (user limit)")
         
         # Use ThreadPoolExecutor for parallel processing with dynamic worker adjustment
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -3782,8 +3926,12 @@ obtained ROM files.
                             started_at = self.file_start_times.get(futures[future])
                             if started_at:
                                 self.file_durations.append(time.time() - started_at)
+                        
+                        # Throttle progress bar updates (every 1% or every file if < 100 files)
                         progress_value = (completed / total) * 100
-                        self.master.after(0, lambda v=progress_value: self.progress.config(value=v))
+                        should_update = (total < 100) or (int(progress_value) > int((completed - 1) / total * 100))
+                        if should_update:
+                            self.master.after(0, lambda v=progress_value: self.progress.config(value=v))
                 
                 except Exception as e:
                     failed += 1
@@ -3843,6 +3991,14 @@ obtained ROM files.
         
         self.is_converting = False
         self.master.after(0, self.conversion_complete)
+    
+    def on_concurrent_change(self, value):
+        """Handle slider change for max concurrent conversions"""
+        new_value = int(float(value))
+        self.max_concurrent_conversions = new_value
+        if hasattr(self, 'concurrent_label'):
+            self.concurrent_label.config(text=str(new_value))
+        self.save_config()
     
     def start_conversion(self):
         """Start the conversion process"""
@@ -5350,9 +5506,6 @@ obtained ROM files.
             
             results_text.insert("end", "Scanning archives...\n\n")
             dialog.update()
-            
-            # Load metadata DATs if available for better detection
-            self.ensure_metadata_loaded()
             
             # Find all compressed files
             archives = self.find_compressed_files(source, recursive_scan.get())
