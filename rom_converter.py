@@ -231,9 +231,10 @@ class ROMConverter:
         self.cpu_cores = max(1, total_cores - 1)
         self.max_workers = self.cpu_cores  # Dynamic worker count
         self.max_concurrent_conversions = self._detect_optimal_workers()  # Auto-detect based on system specs
-        self.ram_threshold_percent = 90  # Throttle if RAM usage exceeds this
-        self.ram_critical_percent = 95  # Pause new conversions if RAM exceeds this
-        self.cpu_threshold_percent = 95  # Throttle if CPU usage exceeds this
+        self.ram_threshold_percent = 80  # Throttle if RAM usage exceeds this
+        self.ram_critical_percent = 85  # Pause new conversions if RAM exceeds this
+        self.cpu_threshold_percent = 90  # Throttle if CPU usage exceeds this
+        self.conversion_semaphore = None  # Will be initialized when conversions start
         self.log_queue = Queue()
         self.total_original_size = 0
         self.total_chd_size = 0
@@ -3533,16 +3534,16 @@ obtained ROM files.
                     if output_path.exists():
                         self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
                         return True
-                    workers = self.check_system_resources()
-                    cmd = [self.maxcso_path, '--threads', str(workers), str(path), '-o', str(output_path)]
+                    # Limit threads to 1 per conversion to reduce RAM usage
+                    cmd = [self.maxcso_path, '--threads', '1', str(path), '-o', str(output_path)]
                     format_label = 'CSO'
                 elif fmt == 'ZSO':
                     output_path = path.with_suffix('.zso')
                     if output_path.exists():
                         self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
                         return True
-                    workers = self.check_system_resources()
-                    cmd = [self.maxcso_path, '--zso', '--threads', str(workers), str(path), '-o', str(output_path)]
+                    # Limit threads to 1 per conversion to reduce RAM usage
+                    cmd = [self.maxcso_path, '--zso', '--threads', '1', str(path), '-o', str(output_path)]
                     format_label = 'ZSO'
                 else:
                     self.log(f"  ❌ Unsupported PSP format: {fmt}")
@@ -3563,16 +3564,16 @@ obtained ROM files.
                     if output_path.exists():
                         self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
                         return True
-                    workers = self.check_system_resources()
-                    cmd = [self.maxcso_path, '--threads', str(workers), str(path), '-o', str(output_path)]
+                    # Limit threads to 1 per conversion to reduce RAM usage
+                    cmd = [self.maxcso_path, '--threads', '1', str(path), '-o', str(output_path)]
                     format_label = 'CSO'
                 elif fmt == 'ZSO':
                     output_path = path.with_suffix('.zso')
                     if output_path.exists():
                         self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
                         return True
-                    workers = self.check_system_resources()
-                    cmd = [self.maxcso_path, '--ziso', '--threads', str(workers), str(path), '-o', str(output_path)]
+                    # Limit threads to 1 per conversion to reduce RAM usage
+                    cmd = [self.maxcso_path, '--ziso', '--threads', '1', str(path), '-o', str(output_path)]
                     format_label = 'ZSO'
                 else:
                     self.log(f"  ❌ Unsupported PS2 format: {fmt}")
@@ -3587,11 +3588,11 @@ obtained ROM files.
         try:
             self.log(f"  Converting ({label} → {format_label}): {path.name} -> {output_path.name}")
             
-            # Use lower process priority to reduce system impact
+            # Use idle process priority to minimize system impact
             creationflags = 0
             if sys.platform == 'win32':
-                # BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
-                creationflags = 0x00004000
+                # IDLE_PRIORITY_CLASS = 0x00000040 (lowest priority)
+                creationflags = 0x00000040
             
             result = subprocess.run(
                 cmd, 
@@ -3695,6 +3696,21 @@ obtained ROM files.
         # Wait if memory pressure is too high (prevents system freeze)
         self._wait_for_memory_pressure()
         
+        # Check available RAM before starting - wait if too low
+        if PSUTIL_AVAILABLE:
+            try:
+                mem = psutil.virtual_memory()
+                available_gb = mem.available / (1024 ** 3)
+                # Need at least 2GB available RAM to start a new conversion
+                while available_gb < 2.0 and self.is_converting:
+                    self.log(f"  ⏳ Waiting for RAM (available: {available_gb:.1f}GB, need: 2GB)...")
+                    gc.collect()
+                    time.sleep(3)
+                    mem = psutil.virtual_memory()
+                    available_gb = mem.available / (1024 ** 3)
+            except Exception:
+                pass
+        
         # Record start time for metrics
         with self.metrics_lock:
             self.file_start_times[cue_file] = time.time()
@@ -3780,33 +3796,32 @@ obtained ROM files.
         """Detect optimal number of concurrent conversions based on system specs.
         
         Heuristics:
-        - 1 worker per 4GB of RAM (conversions are memory-intensive)
-        - Cap at (CPU cores - 1) to keep system responsive
-        - Minimum of 1, maximum of 8 (diminishing returns beyond this)
+        - 1 worker per 6GB of RAM (conversions are very memory-intensive)
+        - Cap at (CPU cores - 2) to keep system responsive
+        - Minimum of 1, maximum of 4 (diminishing returns beyond this)
         """
         total_cores = multiprocessing.cpu_count()
-        max_by_cpu = max(1, total_cores - 1)
+        max_by_cpu = max(1, total_cores - 2)  # Reserve 2 cores for system
         
         if PSUTIL_AVAILABLE:
             try:
-                # Get total RAM in GB
-                total_ram_gb = psutil.virtual_memory().total / (1024 ** 3)
+                # Get available RAM (not total) in GB
+                mem = psutil.virtual_memory()
+                available_ram_gb = mem.available / (1024 ** 3)
                 
-                # 1 worker per 4GB RAM is safe for heavy conversion tasks
-                max_by_ram = max(1, int(total_ram_gb / 4))
+                # 1 worker per 6GB available RAM (conservative for heavy conversions)
+                max_by_ram = max(1, int(available_ram_gb / 6))
                 
                 # Use the more conservative of CPU or RAM limits
                 optimal = min(max_by_cpu, max_by_ram)
                 
-                # Cap at 8 (diminishing returns and prevents runaway on high-end systems)
-                return min(optimal, 8)
+                # Cap at 4 (more aggressive cap to prevent RAM issues)
+                return min(optimal, 4)
             except Exception:
                 pass
         
-        # Fallback: conservative default based on CPU cores only
+        # Fallback: very conservative defaults
         if total_cores >= 8:
-            return 4
-        elif total_cores >= 4:
             return 2
         else:
             return 1
