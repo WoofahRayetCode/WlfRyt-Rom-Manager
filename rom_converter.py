@@ -3615,9 +3615,29 @@ obtained ROM files.
             
             # Track progress for real-time display
             last_progress_update = time.time()
-            progress_update_interval = 1.0  # Update every second
+            progress_update_interval = 2.0  # Update every 2 seconds for stability
             start_time = time.time()
             last_written_size = 0
+            stall_start_time = None  # Track when write speed dropped to 0
+            last_shown_phase = None  # Avoid duplicate phase messages
+            tool_progress = [None]  # Progress reported by chdman/maxcso (list for thread access)
+            stderr_lines = []  # Collect stderr for error reporting
+            
+            # Background thread to read stderr and parse tool progress
+            def read_stderr():
+                try:
+                    for line in process.stderr:
+                        stderr_lines.append(line)
+                        # Parse chdman progress (e.g., "Compressing, 45.3% complete...")
+                        # or maxcso progress
+                        match = re.search(r'(\d+\.?\d*)%', line)
+                        if match:
+                            tool_progress[0] = float(match.group(1))
+                except Exception:
+                    pass
+            
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stderr_thread.start()
             
             # Monitor output file size for progress
             while process.poll() is None:
@@ -3632,7 +3652,8 @@ obtained ROM files.
                         if output_path.exists():
                             current_size = output_path.stat().st_size
                             size_delta = current_size - last_written_size
-                            write_speed_mb = (size_delta / progress_update_interval) / (1024 * 1024)
+                            time_delta = current_time - last_progress_update
+                            write_speed_mb = (size_delta / time_delta) / (1024 * 1024) if time_delta > 0 else 0
                             last_written_size = current_size
                             
                             # Calculate progress percentage based on expected output size
@@ -3640,21 +3661,50 @@ obtained ROM files.
                             estimated_final = original_size * 0.5
                             progress_pct = min(99, (current_size / estimated_final) * 100) if estimated_final > 0 else 0
                             
+                            # Use tool's reported progress if available (more accurate)
+                            if tool_progress[0] is not None:
+                                progress_pct = tool_progress[0]
+                            
                             # Format sizes for display
                             if current_size >= 1024*1024*1024:
                                 size_str = f"{current_size / (1024*1024*1024):.2f} GB"
                             else:
                                 size_str = f"{current_size / (1024*1024):.1f} MB"
                             
-                            # Show real-time progress
-                            self.log(f"  📊 Progress: {progress_pct:.0f}% | Written: {size_str} | Speed: {write_speed_mb:.1f} MB/s | Time: {elapsed:.0f}s")
+                            # Detect stall phases and provide informative feedback
+                            if write_speed_mb < 0.1:  # Essentially stalled
+                                if stall_start_time is None:
+                                    stall_start_time = current_time
+                                stall_duration = current_time - stall_start_time
+                                
+                                # Determine likely phase based on progress and stall duration
+                                if progress_pct >= 95:
+                                    phase = "Finalizing/Verifying"
+                                elif progress_pct >= 80:
+                                    phase = "Final compression pass"
+                                elif stall_duration > 30:
+                                    phase = "Processing (CPU-intensive)"
+                                else:
+                                    phase = "Buffering"
+                                
+                                # Only show phase message if it changed or every 10 seconds
+                                if phase != last_shown_phase or stall_duration % 10 < progress_update_interval:
+                                    self.log(f"  ⏳ {phase}: {progress_pct:.0f}% | Written: {size_str} | Elapsed: {elapsed:.0f}s")
+                                    last_shown_phase = phase
+                            else:
+                                # Normal progress - reset stall tracking
+                                stall_start_time = None
+                                last_shown_phase = None
+                                self.log(f"  📊 Progress: {progress_pct:.0f}% | Written: {size_str} | Speed: {write_speed_mb:.1f} MB/s | Time: {elapsed:.0f}s")
                     except (OSError, FileNotFoundError):
                         pass  # File might not exist yet or be locked
                     
                     last_progress_update = current_time
             
-            # Get final output
-            stdout, stderr = process.communicate(timeout=60)
+            # Wait for stderr thread to finish and get final output
+            stderr_thread.join(timeout=5.0)
+            stdout, _ = process.communicate(timeout=60)
+            stderr = ''.join(stderr_lines)
             returncode = process.returncode
             
             elapsed_total = time.time() - start_time
