@@ -233,7 +233,13 @@ class ROMConverter:
         self.max_concurrent_conversions = self._detect_optimal_workers()  # Auto-detect based on system specs
         self.ram_threshold_percent = 80  # Throttle if RAM usage exceeds this
         self.ram_critical_percent = 85  # Pause new conversions if RAM exceeds this
-        self.cpu_threshold_percent = 90  # Throttle if CPU usage exceeds this
+        self.ram_hard_limit_percent = 92  # Absolute max - force wait if exceeded
+        self.cpu_threshold_percent = 95  # Throttle if CPU usage exceeds this
+        self.disk_write_throttle_mb_s = 500  # Throttle disk writes if exceeding this rate (MB/s) - raised for NVMe
+        self.disk_io_check_interval = 0.5  # How often to check disk I/O (seconds)
+        self.last_disk_throttle_check = 0  # Timestamp of last disk throttle check
+        self.chdman_max_processors = self._detect_chdman_processors()  # Auto-detect based on RAM
+        self.maxcso_threads = self._detect_maxcso_threads()  # Auto-detect based on CPU/RAM
         self.conversion_semaphore = None  # Will be initialized when conversions start
         self.log_queue = Queue()
         self.total_original_size = 0
@@ -2339,6 +2345,7 @@ obtained ROM files.
                 'psp_output_format': self.psp_output_format,
                 'ps2_emulator': self.ps2_emulator,
                 'max_concurrent_conversions': self.max_concurrent_conversions,
+                'disk_write_throttle_mb_s': self.disk_write_throttle_mb_s,
                 'theme': self.current_theme,
                 'system_extract_dirs': {k: self._make_portable_path(v) for k, v in self.system_extract_dirs.items()},
                 # 3DS workflow settings
@@ -2377,6 +2384,7 @@ obtained ROM files.
                 self.psp_output_format = config.get('psp_output_format', 'CSO')
                 self.ps2_emulator = config.get('ps2_emulator', 'PCSX2')
                 self.max_concurrent_conversions = config.get('max_concurrent_conversions', self._detect_optimal_workers())
+                self.disk_write_throttle_mb_s = config.get('disk_write_throttle_mb_s', 100)
                 self.current_theme = config.get('theme', 'PS2')
                 
                 # Restore chdman path if saved and still exists
@@ -3490,7 +3498,8 @@ obtained ROM files.
             if output_path.exists():
                 self.log(f"  ⚠️  CHD already exists, skipping: {output_path.name}")
                 return True
-            cmd = [self.chdman_path, 'createcd', '-i', str(path), '-o', str(output_path)]
+            # Use --numprocessors to limit chdman RAM usage (each processor uses ~500MB-1GB)
+            cmd = [self.chdman_path, 'createcd', '-np', str(self.chdman_max_processors), '-i', str(path), '-o', str(output_path)]
             original_size = sum(f.stat().st_size for f in self.parse_cue_file(path)) + path.stat().st_size
             # Label cues generically since PS1/PS2 CD games both use createcd
             label = 'CD (CUE)'
@@ -3534,16 +3543,16 @@ obtained ROM files.
                     if output_path.exists():
                         self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
                         return True
-                    # Limit threads to 1 per conversion to reduce RAM usage
-                    cmd = [self.maxcso_path, '--threads', '1', str(path), '-o', str(output_path)]
+                    # Use dynamic thread count based on system specs
+                    cmd = [self.maxcso_path, '--threads', str(self.maxcso_threads), str(path), '-o', str(output_path)]
                     format_label = 'CSO'
                 elif fmt == 'ZSO':
                     output_path = path.with_suffix('.zso')
                     if output_path.exists():
                         self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
                         return True
-                    # Limit threads to 1 per conversion to reduce RAM usage
-                    cmd = [self.maxcso_path, '--zso', '--threads', '1', str(path), '-o', str(output_path)]
+                    # Use dynamic thread count based on system specs
+                    cmd = [self.maxcso_path, '--zso', '--threads', str(self.maxcso_threads), str(path), '-o', str(output_path)]
                     format_label = 'ZSO'
                 else:
                     self.log(f"  ❌ Unsupported PSP format: {fmt}")
@@ -3557,23 +3566,24 @@ obtained ROM files.
                     if output_path.exists():
                         self.log(f"  ⚠️  CHD already exists, skipping: {output_path.name}")
                         return True
-                    cmd = [self.chdman_path, 'createdvd', '-i', str(path), '-o', str(output_path)]
+                    # Use --numprocessors to limit chdman RAM usage (each processor uses ~500MB-1GB)
+                    cmd = [self.chdman_path, 'createdvd', '-np', str(self.chdman_max_processors), '-i', str(path), '-o', str(output_path)]
                     format_label = 'CHD'
                 elif fmt == 'CSO':
                     output_path = path.with_suffix('.cso')
                     if output_path.exists():
                         self.log(f"  ⚠️  CSO already exists, skipping: {output_path.name}")
                         return True
-                    # Limit threads to 1 per conversion to reduce RAM usage
-                    cmd = [self.maxcso_path, '--threads', '1', str(path), '-o', str(output_path)]
+                    # Use dynamic thread count based on system specs
+                    cmd = [self.maxcso_path, '--threads', str(self.maxcso_threads), str(path), '-o', str(output_path)]
                     format_label = 'CSO'
                 elif fmt == 'ZSO':
                     output_path = path.with_suffix('.zso')
                     if output_path.exists():
                         self.log(f"  ⚠️  ZSO already exists, skipping: {output_path.name}")
                         return True
-                    # Limit threads to 1 per conversion to reduce RAM usage
-                    cmd = [self.maxcso_path, '--ziso', '--threads', '1', str(path), '-o', str(output_path)]
+                    # Use dynamic thread count based on system specs
+                    cmd = [self.maxcso_path, '--ziso', '--threads', str(self.maxcso_threads), str(path), '-o', str(output_path)]
                     format_label = 'ZSO'
                 else:
                     self.log(f"  ❌ Unsupported PS2 format: {fmt}")
@@ -3594,17 +3604,65 @@ obtained ROM files.
                 # IDLE_PRIORITY_CLASS = 0x00000040 (lowest priority)
                 creationflags = 0x00000040
             
-            result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                timeout=1800,
+            # Use Popen for real-time progress monitoring
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
                 creationflags=creationflags if sys.platform == 'win32' else 0
             )
+            
+            # Track progress for real-time display
+            last_progress_update = time.time()
+            progress_update_interval = 1.0  # Update every second
+            start_time = time.time()
+            last_written_size = 0
+            
+            # Monitor output file size for progress
+            while process.poll() is None:
+                time.sleep(0.5)  # Check every 0.5 seconds
+                
+                current_time = time.time()
+                elapsed = current_time - start_time
+                
+                # Update progress display periodically
+                if current_time - last_progress_update >= progress_update_interval:
+                    try:
+                        if output_path.exists():
+                            current_size = output_path.stat().st_size
+                            size_delta = current_size - last_written_size
+                            write_speed_mb = (size_delta / progress_update_interval) / (1024 * 1024)
+                            last_written_size = current_size
+                            
+                            # Calculate progress percentage based on expected output size
+                            # CHD typically compresses to 40-60% of original, estimate 50%
+                            estimated_final = original_size * 0.5
+                            progress_pct = min(99, (current_size / estimated_final) * 100) if estimated_final > 0 else 0
+                            
+                            # Format sizes for display
+                            if current_size >= 1024*1024*1024:
+                                size_str = f"{current_size / (1024*1024*1024):.2f} GB"
+                            else:
+                                size_str = f"{current_size / (1024*1024):.1f} MB"
+                            
+                            # Show real-time progress
+                            self.log(f"  📊 Progress: {progress_pct:.0f}% | Written: {size_str} | Speed: {write_speed_mb:.1f} MB/s | Time: {elapsed:.0f}s")
+                    except (OSError, FileNotFoundError):
+                        pass  # File might not exist yet or be locked
+                    
+                    last_progress_update = current_time
+            
+            # Get final output
+            stdout, stderr = process.communicate(timeout=60)
+            returncode = process.returncode
+            
+            elapsed_total = time.time() - start_time
 
-            if result.returncode == 0 and output_path.exists():
+            if returncode == 0 and output_path.exists():
                 new_size = output_path.stat().st_size
                 savings = ((original_size - new_size) / original_size) * 100 if original_size > 0 else 0
+                avg_speed = (new_size / elapsed_total) / (1024 * 1024) if elapsed_total > 0 else 0
 
                 # Update totals
                 self.total_original_size += original_size
@@ -3614,18 +3672,29 @@ obtained ROM files.
                 self.completed_files.add(str(path))
                 self.save_progress(self.source_dir)
 
-                self.log(f"  ✅ Success! Saved {savings:.1f}% space")
+                self.log(f"  ✅ Complete! Saved {savings:.1f}% space in {elapsed_total:.1f}s (avg: {avg_speed:.1f} MB/s)")
                 if original_size >= 1024*1024*1024:
-                    self.log(f"     Original: {original_size / (1024*1024*1024):.2f} GB -> {format_label}: {new_size / (1024*1024*1024):.2f} GB")
+                    self.log(f"     Original: {original_size / (1024*1024*1024):.2f} GB → {format_label}: {new_size / (1024*1024*1024):.2f} GB")
                 else:
-                    self.log(f"     Original: {original_size / (1024*1024):.1f} MB -> {format_label}: {new_size / (1024*1024):.1f} MB")
+                    self.log(f"     Original: {original_size / (1024*1024):.1f} MB → {format_label}: {new_size / (1024*1024):.1f} MB")
                 return True
             else:
-                error_text = result.stderr.strip() or result.stdout.strip()
+                error_text = stderr.strip() or stdout.strip()
                 self.log(f"  ❌ Conversion failed: {error_text}")
+                # Clean up partial output file if it exists
+                if output_path.exists():
+                    try:
+                        output_path.unlink()
+                    except Exception:
+                        pass
                 return False
         except subprocess.TimeoutExpired:
             self.log(f"  ❌ Timeout: Conversion took too long")
+            # Try to kill the process
+            try:
+                process.kill()
+            except Exception:
+                pass
             return False
         except Exception as e:
             self.log(f"  ❌ Exception: {e}")
@@ -3729,8 +3798,65 @@ obtained ROM files.
         
         return success
     
-    def _wait_for_memory_pressure(self, max_wait=60):
+    def _wait_for_memory_pressure(self, max_wait=120):
         """Wait if RAM usage is critically high to prevent system freeze.
+        
+        Uses a two-tier system:
+        - ram_critical_percent (85%): Start waiting and warn user
+        - ram_hard_limit_percent (90%): Absolute max, wait indefinitely until below this
+        
+        Args:
+            max_wait: Maximum seconds to wait before proceeding (only for critical, not hard limit)
+        """
+        if not PSUTIL_AVAILABLE:
+            return
+        
+        waited = 0
+        wait_interval = 2.0  # Check every 2 seconds
+        logged_warning = False
+        logged_hard_limit = False
+        
+        while self.is_converting:
+            try:
+                mem = psutil.virtual_memory()
+                
+                # Hard limit - never exceed this, wait indefinitely
+                if mem.percent >= self.ram_hard_limit_percent:
+                    if not logged_hard_limit:
+                        self.log(f"  🛑 HARD LIMIT - RAM at {mem.percent:.1f}% (limit: {self.ram_hard_limit_percent}%), must wait...")
+                        logged_hard_limit = True
+                    gc.collect()
+                    time.sleep(wait_interval)
+                    continue  # Keep waiting, don't increment waited counter for hard limit
+                
+                # Critical threshold - wait with timeout
+                if mem.percent >= self.ram_critical_percent:
+                    if waited >= max_wait:
+                        self.log(f"  ⚠️  Max wait time reached at {mem.percent:.1f}%, proceeding carefully...")
+                        break
+                    
+                    if not logged_warning:
+                        self.log(f"  ⏸️  Pausing - RAM usage high ({mem.percent:.1f}% >= {self.ram_critical_percent}%), waiting...")
+                        logged_warning = True
+                    
+                    gc.collect()
+                    time.sleep(wait_interval)
+                    waited += wait_interval
+                    continue
+                
+                # Memory is acceptable
+                if logged_warning or logged_hard_limit:
+                    self.log(f"  ✅ Memory pressure relieved ({mem.percent:.1f}%), resuming...")
+                break
+                
+            except Exception:
+                break
+        
+        # Also check disk I/O throttling
+        self._wait_for_disk_io_throttle()
+    
+    def _wait_for_disk_io_throttle(self, max_wait=30):
+        """Wait if disk write rate is too high to prevent I/O saturation.
         
         Args:
             max_wait: Maximum seconds to wait before proceeding anyway
@@ -3739,31 +3865,45 @@ obtained ROM files.
             return
         
         waited = 0
-        wait_interval = 2.0  # Check every 2 seconds
+        wait_interval = 0.5  # Check every 0.5 seconds
         logged_warning = False
         
-        while waited < max_wait and self.is_converting:
-            try:
-                mem = psutil.virtual_memory()
-                if mem.percent < self.ram_critical_percent:
+        try:
+            # Get initial disk I/O reading
+            io_start = psutil.disk_io_counters()
+            if io_start is None:
+                return
+            
+            while waited < max_wait and self.is_converting:
+                time.sleep(wait_interval)
+                waited += wait_interval
+                
+                io_now = psutil.disk_io_counters()
+                if io_now is None:
+                    return
+                
+                # Calculate write rate in MB/s
+                write_bytes_delta = io_now.write_bytes - io_start.write_bytes
+                write_rate_mb_s = (write_bytes_delta / wait_interval) / (1024 * 1024)
+                
+                # Update reference point for next check
+                io_start = io_now
+                waited = 0  # Reset wait counter since we got a new reading
+                
+                if write_rate_mb_s < self.disk_write_throttle_mb_s:
                     if logged_warning:
-                        self.log(f"  ✅ Memory pressure relieved ({mem.percent:.1f}%), resuming...")
+                        self.log(f"  ✅ Disk I/O normalized ({write_rate_mb_s:.1f} MB/s), resuming...")
                     return
                 
                 if not logged_warning:
-                    self.log(f"  ⏸️  Pausing - RAM usage critical ({mem.percent:.1f}%), waiting for memory...")
+                    self.log(f"  ⏸️  Throttling - Disk write rate high ({write_rate_mb_s:.1f} MB/s > {self.disk_write_throttle_mb_s} MB/s limit)...")
                     logged_warning = True
-                
-                # Force garbage collection to try to free memory
-                gc.collect()
-                
-                time.sleep(wait_interval)
-                waited += wait_interval
-            except Exception:
-                return
+                    
+        except Exception:
+            return
         
         if logged_warning:
-            self.log(f"  ⚠️  Max wait time reached, proceeding anyway...")
+            self.log(f"  ⚠️  Disk throttle timeout, proceeding anyway...")
     
     def check_system_resources(self):
         """Check system resources and return recommended worker count"""
@@ -3782,8 +3922,21 @@ obtained ROM files.
             if cpu_percent >= self.cpu_threshold_percent:
                 return max(1, self.cpu_cores // 2)
             
-            # If moderate load, use 3/4 of available cores
-            if mem.percent >= 75 or cpu_percent >= 80:
+            # Check disk I/O - if write rate is high, reduce workers
+            try:
+                io = psutil.disk_io_counters()
+                if io and hasattr(self, 'last_disk_write_bytes') and self.last_disk_write_bytes > 0:
+                    write_delta = io.write_bytes - self.last_disk_write_bytes
+                    # Estimate write rate over a short period
+                    write_rate_mb_s = (write_delta / self.disk_io_check_interval) / (1024 * 1024)
+                    if write_rate_mb_s > self.disk_write_throttle_mb_s:
+                        return max(1, self.cpu_cores // 2)
+            except Exception:
+                pass
+            
+            # If moderate load, use 3/4 of available cores (use threshold - 5% for moderate)
+            moderate_threshold = max(50, self.ram_threshold_percent - 10)
+            if mem.percent >= moderate_threshold or cpu_percent >= 80:
                 return max(1, int(self.cpu_cores * 0.75))
             
             # Normal operation - use all allocated cores
@@ -3822,6 +3975,88 @@ obtained ROM files.
         
         # Fallback: very conservative defaults
         if total_cores >= 8:
+            return 2
+        else:
+            return 1
+    
+    def _detect_chdman_processors(self):
+        """Detect optimal number of processors for chdman based on available RAM.
+        
+        Each chdman processor uses approximately 500MB-1GB RAM.
+        We want to balance speed vs memory usage.
+        """
+        total_cores = multiprocessing.cpu_count()
+        
+        if PSUTIL_AVAILABLE:
+            try:
+                mem = psutil.virtual_memory()
+                total_ram_gb = mem.total / (1024 ** 3)
+                available_ram_gb = mem.available / (1024 ** 3)
+                
+                # Calculate based on available RAM (1 processor per 1.5GB available)
+                # This is more aggressive than before but still safe
+                max_by_ram = max(1, int(available_ram_gb / 1.5))
+                
+                # Also cap by CPU cores (no benefit beyond core count)
+                max_by_cpu = max(1, total_cores - 1)
+                
+                # Use minimum of RAM and CPU limits
+                optimal = min(max_by_ram, max_by_cpu)
+                
+                # For systems with lots of RAM (16GB+), allow more processors
+                if total_ram_gb >= 24:
+                    # 24GB+ RAM: allow up to 8 processors
+                    return min(optimal, 8)
+                elif total_ram_gb >= 16:
+                    # 16GB+ RAM: allow up to 6 processors
+                    return min(optimal, 6)
+                elif total_ram_gb >= 8:
+                    # 8GB+ RAM: allow up to 4 processors
+                    return min(optimal, 4)
+                else:
+                    # Less than 8GB: limit to 2
+                    return min(optimal, 2)
+            except Exception:
+                pass
+        
+        # Fallback based on CPU count
+        if total_cores >= 8:
+            return 4
+        elif total_cores >= 4:
+            return 2
+        else:
+            return 1
+    
+    def _detect_maxcso_threads(self):
+        """Detect optimal number of threads for maxcso based on system specs.
+        
+        maxcso is less memory-intensive than chdman, so we can be more aggressive.
+        """
+        total_cores = multiprocessing.cpu_count()
+        
+        if PSUTIL_AVAILABLE:
+            try:
+                mem = psutil.virtual_memory()
+                total_ram_gb = mem.total / (1024 ** 3)
+                
+                # maxcso uses less RAM per thread (~200-300MB)
+                # Allow more threads, cap at (cores - 1)
+                max_threads = max(1, total_cores - 1)
+                
+                # Scale based on RAM
+                if total_ram_gb >= 16:
+                    return max_threads
+                elif total_ram_gb >= 8:
+                    return min(max_threads, 4)
+                else:
+                    return min(max_threads, 2)
+            except Exception:
+                pass
+        
+        # Fallback
+        if total_cores >= 8:
+            return 4
+        elif total_cores >= 4:
             return 2
         else:
             return 1
@@ -3878,11 +4113,21 @@ obtained ROM files.
         self.log("\n" + "="*60)
         self.log("STARTING CONVERSION...")
         total_cores = multiprocessing.cpu_count()
-        self.log(f"Using {self.cpu_cores} of {total_cores} CPU cores (1 core reserved for system)")
+        if PSUTIL_AVAILABLE:
+            try:
+                mem = psutil.virtual_memory()
+                total_ram_gb = mem.total / (1024 ** 3)
+                avail_ram_gb = mem.available / (1024 ** 3)
+                self.log(f"System: {total_cores} CPU cores | {total_ram_gb:.1f} GB RAM ({avail_ram_gb:.1f} GB available)")
+            except Exception:
+                self.log(f"System: {total_cores} CPU cores")
+        else:
+            self.log(f"System: {total_cores} CPU cores")
+        self.log(f"Parallelism: chdman={self.chdman_max_processors} proc | maxcso={self.maxcso_threads} threads | workers={self.max_concurrent_conversions}")
         if self.process_ps2_isos.get():
             self.log(f"PS2 emulator: {self.ps2_emulator} | Output format: {self.ps2_output_format}")
         if PSUTIL_AVAILABLE:
-            self.log(f"Resource monitoring: Enabled (RAM threshold: {self.ram_threshold_percent}%)")
+            self.log(f"Throttling: RAM soft={self.ram_critical_percent}% hard={self.ram_hard_limit_percent}% | Disk={self.disk_write_throttle_mb_s} MB/s")
         self.log("="*60 + "\n")
         
         successful = 0
