@@ -386,7 +386,110 @@ class ROMConverter:
             self.chdman_path = chdman
             return True
         
+        # On Linux, check for chdman inside Flatpak MAME installation
+        if sys.platform != "win32":
+            flatpak_chdman = self._find_flatpak_chdman()
+            if flatpak_chdman:
+                self.chdman_path = flatpak_chdman
+                return True
+        
         return False
+    
+    def _find_flatpak_chdman(self):
+        """Search for chdman inside Flatpak MAME installations"""
+        import glob
+        
+        # Try using 'flatpak info' to locate the MAME install
+        try:
+            result = subprocess.run(
+                ['flatpak', 'info', '--show-location', 'org.mamedev.MAME'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                location = result.stdout.strip()
+                chdman_path = os.path.join(location, 'files', 'bin', 'chdman')
+                if os.path.isfile(chdman_path) and os.access(chdman_path, os.X_OK):
+                    return chdman_path
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+        
+        # Fallback: search common Flatpak install directories
+        flatpak_search_dirs = [
+            '/var/lib/flatpak/app/org.mamedev.MAME',
+            os.path.expanduser('~/.local/share/flatpak/app/org.mamedev.MAME'),
+        ]
+        for base_dir in flatpak_search_dirs:
+            pattern = os.path.join(base_dir, '**', 'files', 'bin', 'chdman')
+            matches = glob.glob(pattern, recursive=True)
+            for match in matches:
+                if os.path.isfile(match) and os.access(match, os.X_OK):
+                    return match
+        
+        return None
+    
+    def _is_immutable_distro(self):
+        """Detect if running on an immutable/atomic Linux distro (Bazzite, SteamOS, Kinoite, etc.)"""
+        try:
+            with open('/etc/os-release', 'r') as f:
+                os_release = f.read().lower()
+            # Check for known immutable distros
+            immutable_ids = ['bazzite', 'steamos', 'silverblue', 'kinoite', 'aurora', 'bluefin', 'ublue']
+            for name in immutable_ids:
+                if name in os_release:
+                    return True
+            # Check for rpm-ostree (generic Fedora Atomic indicator)
+            if shutil.which('rpm-ostree'):
+                return True
+        except Exception:
+            pass
+        return False
+    
+    def _get_distro_id(self):
+        """Get the distro ID from os-release"""
+        try:
+            with open('/etc/os-release', 'r') as f:
+                for line in f:
+                    if line.startswith('ID='):
+                        return line.strip().split('=', 1)[1].strip('"').lower()
+                    if line.startswith('ID_LIKE='):
+                        return line.strip().split('=', 1)[1].strip('"').lower()
+        except Exception:
+            pass
+        return ''
+    
+    def _get_chdman_install_instructions(self):
+        """Generate OS-aware chdman installation instructions"""
+        msg = "Could not download chdman automatically.\n\n"
+        
+        if self._is_immutable_distro():
+            # Immutable distro (Bazzite, SteamOS, Kinoite, etc.)
+            msg += (
+                "Install via Flatpak (recommended):\n"
+                "   flatpak install --user flathub org.mamedev.MAME\n\n"
+                "Or install EmuDeck (includes chdman).\n"
+            )
+        else:
+            distro = self._get_distro_id()
+            msg += "Install chdman using your package manager:\n\n"
+            if 'arch' in distro or 'manjaro' in distro:
+                msg += "   sudo pacman -S mame-tools\n"
+            elif 'debian' in distro or 'ubuntu' in distro or 'mint' in distro:
+                msg += "   sudo apt install mame-tools\n"
+            elif 'fedora' in distro or 'rhel' in distro or 'centos' in distro:
+                msg += "   sudo dnf install mame-tools\n"
+            else:
+                msg += (
+                    "   sudo pacman -S mame-tools  (Arch)\n"
+                    "   sudo apt install mame-tools  (Debian/Ubuntu)\n"
+                    "   sudo dnf install mame-tools  (Fedora)\n"
+                )
+            msg += (
+                "\nOr install via Flatpak:\n"
+                "   flatpak install flathub org.mamedev.MAME\n"
+            )
+        
+        msg += "\nThen restart this application."
+        return msg
     
     def get_installed_chdman_version(self):
         """Get the version of the currently installed chdman"""
@@ -766,6 +869,51 @@ class ROMConverter:
                     print(f"Download from {source_type} failed: {e}")
                     continue
             
+            # If direct download failed, try installing MAME via Flatpak
+            if not downloaded:
+                try:
+                    status_label.config(text="Trying Flatpak install of MAME...")
+                    progress_window.update()
+                    
+                    # Check if flatpak is available
+                    if shutil.which('flatpak'):
+                        # Try --user install first (works on immutable distros like Bazzite),
+                        # then fall back to system-wide install
+                        flatpak_cmds = [
+                            ['flatpak', 'install', '-y', '--noninteractive', '--user', 'flathub', 'org.mamedev.MAME'],
+                            ['flatpak', 'install', '-y', '--noninteractive', 'flathub', 'org.mamedev.MAME'],
+                        ]
+                        for flatpak_cmd in flatpak_cmds:
+                            try:
+                                install_type = '--user' if '--user' in flatpak_cmd else 'system'
+                                status_label.config(text=f"Trying Flatpak install ({install_type})...")
+                                progress_window.update()
+                                result = subprocess.run(
+                                    flatpak_cmd,
+                                    capture_output=True, text=True, timeout=300
+                                )
+                                if result.returncode == 0:
+                                    # Find chdman inside the Flatpak installation
+                                    flatpak_chdman = self._find_flatpak_chdman()
+                                    if flatpak_chdman:
+                                        self.chdman_path = flatpak_chdman
+                                        self.save_config()
+                                        progress_window.destroy()
+                                        if temp_dir.exists():
+                                            try:
+                                                shutil.rmtree(temp_dir)
+                                            except:
+                                                pass
+                                        messagebox.showinfo("Success",
+                                            f"MAME installed via Flatpak!\n\nchdman found at:\n{flatpak_chdman}",
+                                            parent=self.master)
+                                        return True
+                            except (subprocess.TimeoutExpired, Exception) as e:
+                                print(f"Flatpak install ({install_type}) failed: {e}")
+                                continue
+                except (FileNotFoundError, Exception) as e:
+                    print(f"Flatpak install failed: {e}")
+            
             progress_window.destroy()
             
             # Clean up temp directory
@@ -781,18 +929,11 @@ class ROMConverter:
                 messagebox.showinfo("Success", f"chdman downloaded successfully!\n\nLocation:\n{self.chdman_path}", parent=self.master)
                 return True
             else:
-                # Provide helpful instructions for SteamOS/Linux
+                # Provide OS-aware instructions
+                install_msg = self._get_chdman_install_instructions()
                 messagebox.showwarning(
                     "Manual Installation Required",
-                    "Could not download chdman automatically.\n\n"
-                    "For SteamOS/Steam Deck:\n"
-                    "1. Install EmuDeck (includes chdman), or\n"
-                    "2. Open Konsole and run:\n"
-                    "   flatpak install flathub org.mamedev.MAME\n\n"
-                    "For other Linux:\n"
-                    "   sudo pacman -S mame-tools  (Arch)\n"
-                    "   sudo apt install mame-tools  (Debian/Ubuntu)\n\n"
-                    "Then place 'chdman' next to this application.",
+                    install_msg,
                     parent=self.master
                 )
                 return False
