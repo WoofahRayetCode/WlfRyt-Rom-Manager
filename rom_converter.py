@@ -248,6 +248,9 @@ class ROMConverter:
         self.process_ps2_cues = BooleanVar(value=False)  # Toggle for PS2 BIN/CUE processing (CD-based games)
         self.process_ps2_isos = BooleanVar(value=False)  # Toggle for PS2 ISO processing
         self.process_psp_isos = BooleanVar(value=False)  # Toggle for PSP ISO processing
+        self.process_nes_roms = BooleanVar(value=False)  # Toggle for NES ROM processing
+        self.process_snes_roms = BooleanVar(value=False)  # Toggle for SNES ROM processing
+        self.process_n64_roms = BooleanVar(value=False)  # Toggle for N64 ROM processing
         self.extract_compressed = BooleanVar(value=True)  # Toggle for extracting compressed files
         self.delete_archives_after_extract = BooleanVar(value=False)  # Delete archives after extraction
         self.seven_zip_path = None  # Path to 7z executable for .7z and .rar files
@@ -2476,6 +2479,9 @@ obtained ROM files.
                 'process_ps2_cues': self.process_ps2_cues.get(),
                 'process_ps2_isos': self.process_ps2_isos.get(),
                 'process_psp_isos': self.process_psp_isos.get(),
+                'process_nes_roms': self.process_nes_roms.get(),
+                'process_snes_roms': self.process_snes_roms.get(),
+                'process_n64_roms': self.process_n64_roms.get(),
                 'extract_compressed': self.extract_compressed.get(),
                 'delete_archives_after_extract': self.delete_archives_after_extract.get(),
                 'chdman_path': self._make_portable_path(self.chdman_path),
@@ -2519,6 +2525,9 @@ obtained ROM files.
                 self.process_ps2_cues.set(config.get('process_ps2_cues', False))
                 self.process_ps2_isos.set(config.get('process_ps2_isos', False))
                 self.process_psp_isos.set(config.get('process_psp_isos', False))
+                self.process_nes_roms.set(config.get('process_nes_roms', False))
+                self.process_snes_roms.set(config.get('process_snes_roms', False))
+                self.process_n64_roms.set(config.get('process_n64_roms', False))
                 self.extract_compressed.set(config.get('extract_compressed', True))
                 self.delete_archives_after_extract.set(config.get('delete_archives_after_extract', False))
                 self.ps2_output_format = config.get('ps2_output_format', 'CHD')
@@ -2966,6 +2975,21 @@ obtained ROM files.
             fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
             activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
 
+        Checkbutton(options_frame, text="🎮 Process NES ROM files (.nes)",
+                variable=self.process_nes_roms, font=cb_font,
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
+        Checkbutton(options_frame, text="🎮 Process SNES ROM files (.sfc/.smc/.snes)",
+                variable=self.process_snes_roms, font=cb_font,
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
+        Checkbutton(options_frame, text="🎮 Process N64 ROM files (.n64/.z64/.v64)",
+                variable=self.process_n64_roms, font=cb_font,
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
         # Emulator preset selection
         emulator_frame = Frame(options_frame, bg=cb_bg)
         emulator_frame.pack(fill="x", pady=(4, 2))
@@ -3391,7 +3415,7 @@ obtained ROM files.
         return extracted_folders
 
     def find_game_files(self, directory, recursive=True):
-        """Find all supported game descriptor files (.cue and optionally .iso)"""
+        """Find all supported game descriptor files (.cue and optionally .iso, .nes, .sfc, .smc, .snes, .n64, .z64, .v64)"""
         path = Path(directory)
         files = set()
         if recursive:
@@ -3403,6 +3427,16 @@ obtained ROM files.
                 files.update(path.rglob("*.iso"))
             if self.process_psp_isos.get():
                 files.update(path.rglob("*.iso"))
+            if self.process_nes_roms.get():
+                files.update(path.rglob("*.nes"))
+            if self.process_snes_roms.get():
+                files.update(path.rglob("*.sfc"))
+                files.update(path.rglob("*.smc"))
+                files.update(path.rglob("*.snes"))
+            if self.process_n64_roms.get():
+                files.update(path.rglob("*.n64"))
+                files.update(path.rglob("*.z64"))
+                files.update(path.rglob("*.v64"))
         else:
             if self.process_ps1_cues.get():
                 files.update(path.glob("*.cue"))
@@ -3412,6 +3446,16 @@ obtained ROM files.
                 files.update(path.glob("*.iso"))
             if self.process_psp_isos.get():
                 files.update(path.glob("*.iso"))
+            if self.process_nes_roms.get():
+                files.update(path.glob("*.nes"))
+            if self.process_snes_roms.get():
+                files.update(path.glob("*.sfc"))
+                files.update(path.glob("*.smc"))
+                files.update(path.glob("*.snes"))
+            if self.process_n64_roms.get():
+                files.update(path.glob("*.n64"))
+                files.update(path.glob("*.z64"))
+                files.update(path.glob("*.v64"))
         # Sort for stable processing order
         return sorted(files)
     
@@ -3501,6 +3545,443 @@ obtained ROM files.
         
         return bin_files
     
+    def parse_nes_header(self, nes_path):
+        """Parse NES ROM header (iNES/NES 2.0 format) to extract game information.
+        
+        Returns:
+            dict with ROM info: {
+                'format': 'iNES' or 'NES 2.0' or 'Unknown',
+                'prg_rom_size': PRG ROM size in KB,
+                'chr_rom_size': CHR ROM size in KB,
+                'mapper': Mapper number,
+                'mirroring': 'Horizontal', 'Vertical', or 'Four-screen',
+                'battery': True/False (has battery-backed RAM),
+                'trainer': True/False (has 512-byte trainer),
+                'region': 'NTSC' or 'PAL' or 'Dual' (NES 2.0 only),
+                'valid': True/False
+            }
+        """
+        rom_info = {
+            'format': 'Unknown',
+            'prg_rom_size': 0,
+            'chr_rom_size': 0,
+            'mapper': 0,
+            'mirroring': 'Unknown',
+            'battery': False,
+            'trainer': False,
+            'region': 'Unknown',
+            'valid': False
+        }
+        
+        try:
+            with open(nes_path, 'rb') as f:
+                header = f.read(16)
+                
+            # Check for iNES header signature "NES\x1A"
+            if len(header) < 16 or header[0:4] != b'NES\x1a':
+                self.log(f"  ⚠️  Invalid NES ROM header (missing NES signature): {nes_path.name}")
+                return rom_info
+            
+            rom_info['valid'] = True
+            
+            # Parse header bytes
+            prg_rom_units = header[4]  # 16 KB units
+            chr_rom_units = header[5]  # 8 KB units
+            flags6 = header[6]
+            flags7 = header[7]
+            flags9 = header[9] if len(header) > 9 else 0
+            
+            # Determine format (iNES vs NES 2.0)
+            if (flags7 & 0x0C) == 0x08:
+                rom_info['format'] = 'NES 2.0'
+                # NES 2.0 extended fields
+                # Mapper number is composed of:
+                # - Lower nibble: bits 4-7 of flags6
+                # - Middle nibble: bits 4-7 of flags7  
+                # - Upper nibble: bits 0-3 of byte 8 (if available)
+                mapper_low = (flags6 & 0xF0) >> 4
+                mapper_mid = flags7 & 0xF0
+                mapper_high = 0
+                if len(header) > 8:
+                    mapper_high = (header[8] & 0x0F) << 8
+                rom_info['mapper'] = mapper_high | mapper_mid | mapper_low
+                
+                # NES 2.0 region
+                if len(header) > 12:
+                    flags12 = header[12]
+                    region_bits = flags12 & 0x03
+                    if region_bits == 0:
+                        rom_info['region'] = 'NTSC'
+                    elif region_bits == 1:
+                        rom_info['region'] = 'PAL'
+                    else:
+                        rom_info['region'] = 'Dual'
+            else:
+                rom_info['format'] = 'iNES'
+                # Standard iNES mapper
+                mapper_low = (flags6 & 0xF0) >> 4
+                mapper_high = flags7 & 0xF0
+                rom_info['mapper'] = mapper_high | mapper_low
+                
+                # Try to guess region from ROM size/mapper (not reliable)
+                rom_info['region'] = 'NTSC'  # Default to NTSC for iNES 1.0
+            
+            # PRG ROM size (16 KB units)
+            rom_info['prg_rom_size'] = prg_rom_units * 16
+            
+            # CHR ROM size (8 KB units)
+            rom_info['chr_rom_size'] = chr_rom_units * 8
+            
+            # Mirroring
+            if flags6 & 0x08:
+                rom_info['mirroring'] = 'Four-screen'
+            elif flags6 & 0x01:
+                rom_info['mirroring'] = 'Vertical'
+            else:
+                rom_info['mirroring'] = 'Horizontal'
+            
+            # Battery-backed RAM
+            rom_info['battery'] = bool(flags6 & 0x02)
+            
+            # Trainer
+            rom_info['trainer'] = bool(flags6 & 0x04)
+            
+        except Exception as e:
+            self.log(f"  ERROR parsing NES ROM: {e}")
+            rom_info['valid'] = False
+        
+        return rom_info
+    
+    def parse_snes_header(self, snes_path):
+        """Parse SNES ROM header to extract game information.
+        
+        SNES ROMs can have different formats:
+        - With or without 512-byte SMC copier header
+        - LoROM or HiROM memory mapping
+        
+        Returns:
+            dict with ROM info: {
+                'title': Game title string,
+                'rom_size': ROM size in KB,
+                'rom_makeup': 'LoROM', 'HiROM', 'ExLoROM', 'ExHiROM', etc.,
+                'rom_type': Cart type description,
+                'region': 'Japan', 'USA', 'Europe', 'Other',
+                'version': Version number,
+                'has_smc_header': True/False (512-byte copier header),
+                'checksum_valid': True/False,
+                'valid': True/False
+            }
+        """
+        rom_info = {
+            'title': 'Unknown',
+            'rom_size': 0,
+            'rom_makeup': 'Unknown',
+            'rom_type': 'Unknown',
+            'region': 'Unknown',
+            'version': 0,
+            'has_smc_header': False,
+            'checksum_valid': False,
+            'valid': False
+        }
+        
+        rom_type_map = {
+            0x00: 'ROM',
+            0x01: 'ROM + RAM',
+            0x02: 'ROM + SRAM',
+            0x03: 'ROM + DSP1',
+            0x04: 'ROM + DSP1 + RAM',
+            0x05: 'ROM + DSP1 + SRAM',
+            0x13: 'ROM + SuperFX',
+            0x14: 'ROM + SuperFX + RAM',
+            0x15: 'ROM + SuperFX + SRAM',
+            0x1A: 'ROM + SuperFX + SRAM (alt)',
+            0x33: 'ROM + SA-1',
+            0x34: 'ROM + SA-1 + RAM',
+            0x35: 'ROM + SA-1 + SRAM',
+        }
+        
+        region_map = {
+            0x00: 'Japan',
+            0x01: 'USA',
+            0x02: 'Europe',
+            0x03: 'Sweden',
+            0x04: 'Finland',
+            0x05: 'Denmark',
+            0x06: 'France',
+            0x07: 'Netherlands',
+            0x08: 'Spain',
+            0x09: 'Germany',
+            0x0A: 'Italy',
+            0x0B: 'China',
+            0x0C: 'Indonesia',
+            0x0D: 'Korea',
+            0x0E: 'Global',
+            0x0F: 'Canada',
+            0x10: 'Brazil',
+            0x11: 'Australia',
+        }
+        
+        try:
+            with open(snes_path, 'rb') as f:
+                rom_data = f.read()
+            
+            rom_size_actual = len(rom_data)
+            rom_info['rom_size'] = rom_size_actual // 1024
+            
+            # Check for 512-byte SMC header
+            has_header = (rom_size_actual % 1024) == 512
+            header_offset = 512 if has_header else 0
+            rom_info['has_smc_header'] = has_header
+            
+            # Try to find valid header at LoROM and HiROM positions
+            lorom_offset = 0x7FB0 + header_offset
+            hirom_offset = 0xFFB0 + header_offset
+            
+            def read_header_at(offset):
+                """Read and validate header at given offset"""
+                if offset + 0x30 > len(rom_data):
+                    return None
+                
+                header = rom_data[offset:offset + 0x30]
+                
+                # Extract fields
+                title_bytes = header[0x00:0x15]
+                rom_makeup = header[0x15]
+                rom_type_byte = header[0x16]
+                rom_size_byte = header[0x17]
+                region_byte = header[0x19]
+                version = header[0x1B]
+                checksum_comp = (header[0x1D] << 8) | header[0x1C]
+                checksum = (header[0x1F] << 8) | header[0x1E]
+                
+                # Validate: checksum + complement should equal 0xFFFF
+                checksum_valid = (checksum + checksum_comp) == 0xFFFF
+                
+                # Validate: title should be printable ASCII/extended ASCII
+                try:
+                    title = title_bytes.decode('ascii', errors='ignore').strip('\x00 ')
+                    title_valid = all(32 <= ord(c) < 127 or c == '\x00' for c in title_bytes.decode('ascii', errors='replace'))
+                except:
+                    title_valid = False
+                    title = ''
+                
+                # Validate: ROM size makes sense
+                if rom_size_byte < 20:
+                    calculated_size = 1 << rom_size_byte  # 2^rom_size_byte KB
+                    size_valid = abs(calculated_size - rom_info['rom_size']) < calculated_size * 0.1
+                else:
+                    size_valid = False
+                
+                # Score the header validity
+                score = 0
+                if checksum_valid:
+                    score += 3
+                if title_valid and len(title) > 0:
+                    score += 2
+                if size_valid:
+                    score += 2
+                if rom_makeup in [0x20, 0x21, 0x22, 0x23, 0x25, 0x30, 0x31, 0x32, 0x35]:
+                    score += 1
+                
+                return {
+                    'score': score,
+                    'title': title,
+                    'rom_makeup': rom_makeup,
+                    'rom_type': rom_type_byte,
+                    'rom_size_byte': rom_size_byte,
+                    'region': region_byte,
+                    'version': version,
+                    'checksum_valid': checksum_valid
+                }
+            
+            # Try both positions and pick the best match
+            lorom_header = read_header_at(lorom_offset)
+            hirom_header = read_header_at(hirom_offset)
+            
+            best_header = None
+            rom_mapping = 'Unknown'
+            
+            if lorom_header and hirom_header:
+                # Both found, use highest scoring one
+                if lorom_header['score'] >= hirom_header['score']:
+                    best_header = lorom_header
+                    rom_mapping = 'LoROM'
+                else:
+                    best_header = hirom_header
+                    rom_mapping = 'HiROM'
+            elif lorom_header:
+                best_header = lorom_header
+                rom_mapping = 'LoROM'
+            elif hirom_header:
+                best_header = hirom_header
+                rom_mapping = 'HiROM'
+            
+            if best_header and best_header['score'] >= 3:
+                rom_info['valid'] = True
+                rom_info['title'] = best_header['title']
+                rom_info['checksum_valid'] = best_header['checksum_valid']
+                rom_info['version'] = best_header['version']
+                
+                # Decode ROM makeup
+                makeup = best_header['rom_makeup']
+                if makeup == 0x20:
+                    rom_info['rom_makeup'] = 'LoROM'
+                elif makeup == 0x21:
+                    rom_info['rom_makeup'] = 'HiROM'
+                elif makeup == 0x22:
+                    rom_info['rom_makeup'] = 'LoROM + S-DD1'
+                elif makeup == 0x23:
+                    rom_info['rom_makeup'] = 'LoROM + SA-1'
+                elif makeup == 0x25:
+                    rom_info['rom_makeup'] = 'ExHiROM'
+                elif makeup == 0x30:
+                    rom_info['rom_makeup'] = 'LoROM + FastROM'
+                elif makeup == 0x31:
+                    rom_info['rom_makeup'] = 'HiROM + FastROM'
+                elif makeup == 0x32:
+                    rom_info['rom_makeup'] = 'ExLoROM'
+                elif makeup == 0x35:
+                    rom_info['rom_makeup'] = 'ExHiROM + FastROM'
+                else:
+                    rom_info['rom_makeup'] = f'{rom_mapping} (0x{makeup:02X})'
+                
+                # Decode ROM type
+                rom_info['rom_type'] = rom_type_map.get(best_header['rom_type'], f'Type 0x{best_header["rom_type"]:02X}')
+                
+                # Decode region
+                rom_info['region'] = region_map.get(best_header['region'], f'Unknown (0x{best_header["region"]:02X})')
+            
+        except Exception as e:
+            self.log(f"  ERROR parsing SNES ROM: {e}")
+            rom_info['valid'] = False
+        
+        return rom_info
+    
+    def parse_n64_header(self, n64_path):
+        """Parse N64 ROM header to extract game information.
+        
+        N64 ROMs can have different byte orderings:
+        - Big-endian (.z64): Native format, 0x80371240
+        - Little-endian (.n64): Byte-swapped, 0x40123780
+        - Byte-swapped (.v64): Word-swapped, 0x37804012
+        
+        Returns:
+            dict with ROM info: {
+                'title': Game title string,
+                'game_code': Game ID code (4 chars),
+                'region': 'NTSC', 'PAL', 'Gateway 64', etc.,
+                'rom_size': ROM size in MB,
+                'byte_order': 'Big-endian', 'Little-endian', 'Byte-swapped',
+                'crc1': CRC1 checksum,
+                'crc2': CRC2 checksum,
+                'valid': True/False
+            }
+        """
+        rom_info = {
+            'title': 'Unknown',
+            'game_code': 'Unknown',
+            'region': 'Unknown',
+            'rom_size': 0,
+            'byte_order': 'Unknown',
+            'crc1': 0,
+            'crc2': 0,
+            'valid': False
+        }
+        
+        region_codes = {
+            0x41: 'Japan/USA (NTSC)',  # 'A'
+            0x42: 'Brazil (NTSC)',  # 'B'
+            0x43: 'China (PAL)',  # 'C'
+            0x44: 'Germany (PAL)',  # 'D'
+            0x45: 'USA (NTSC)',  # 'E'
+            0x46: 'France (PAL)',  # 'F'
+            0x47: 'Gateway 64 (NTSC)',  # 'G'
+            0x48: 'Netherlands (PAL)',  # 'H'
+            0x49: 'Italy (PAL)',  # 'I'
+            0x4A: 'Japan (NTSC)',  # 'J'
+            0x4B: 'Korea (NTSC)',  # 'K'
+            0x4C: 'Gateway 64 (PAL)',  # 'L'
+            0x4E: 'Canada (NTSC)',  # 'N'
+            0x50: 'Europe (PAL)',  # 'P'
+            0x53: 'Spain (PAL)',  # 'S'
+            0x55: 'Australia (PAL)',  # 'U'
+            0x57: 'Scandinavia (PAL)',  # 'W'
+            0x58: 'Europe (PAL)',  # 'X'
+            0x59: 'Europe (PAL)',  # 'Y'
+        }
+        
+        try:
+            with open(n64_path, 'rb') as f:
+                header_data = f.read(4096)  # Read first 4KB
+            
+            if len(header_data) < 64:
+                return rom_info
+            
+            rom_size_bytes = n64_path.stat().st_size
+            rom_info['rom_size'] = rom_size_bytes / (1024 * 1024)  # Convert to MB
+            
+            # Detect byte order from first 4 bytes (PI_BSB_DOM1 register)
+            first_dword = header_data[0:4]
+            
+            if first_dword == b'\x80\x37\x12\x40':
+                # Big-endian (.z64) - native N64 format
+                rom_info['byte_order'] = 'Big-endian (.z64)'
+                data = header_data
+            elif first_dword == b'\x37\x80\x40\x12':
+                # Byte-swapped (.v64)
+                rom_info['byte_order'] = 'Byte-swapped (.v64)'
+                # Convert to big-endian for easier parsing
+                data = bytearray(len(header_data))
+                for i in range(0, len(header_data), 2):
+                    data[i] = header_data[i + 1]
+                    data[i + 1] = header_data[i]
+            elif first_dword == b'\x40\x12\x37\x80':
+                # Little-endian (.n64)
+                rom_info['byte_order'] = 'Little-endian (.n64)'
+                # Convert to big-endian for easier parsing
+                data = bytearray(len(header_data))
+                for i in range(0, len(header_data), 4):
+                    data[i] = header_data[i + 3]
+                    data[i + 1] = header_data[i + 2]
+                    data[i + 2] = header_data[i + 1]
+                    data[i + 3] = header_data[i]
+            else:
+                # Unknown format
+                return rom_info
+            
+            rom_info['valid'] = True
+            
+            # Extract CRC values (bytes 0x10-0x17, big-endian)
+            rom_info['crc1'] = (data[0x10] << 24) | (data[0x11] << 16) | (data[0x12] << 8) | data[0x13]
+            rom_info['crc2'] = (data[0x14] << 24) | (data[0x15] << 16) | (data[0x16] << 8) | data[0x17]
+            
+            # Extract game title (bytes 0x20-0x33, 20 bytes, ASCII)
+            title_bytes = data[0x20:0x34]
+            try:
+                title = title_bytes.decode('ascii', errors='ignore').strip('\x00 ')
+                if title:
+                    rom_info['title'] = title
+            except:
+                pass
+            
+            # Extract game code (bytes 0x3B-0x3E, 4 bytes)
+            try:
+                game_code = data[0x3B:0x3F].decode('ascii', errors='ignore')
+                if game_code.isprintable():
+                    rom_info['game_code'] = game_code
+            except:
+                pass
+            
+            # Extract region code (byte 0x3E)
+            region_byte = data[0x3E]
+            rom_info['region'] = region_codes.get(region_byte, f'Unknown (0x{region_byte:02X})')
+            
+        except Exception as e:
+            self.log(f"  ERROR parsing N64 ROM: {e}")
+            rom_info['valid'] = False
+        
+        return rom_info
+    
     def scan_directory(self):
         """Scan directory for CUE files"""
         if not self.source_dir or not os.path.isdir(self.source_dir):
@@ -3551,6 +4032,9 @@ obtained ROM files.
         ps1_count = 0
         ps2_count = 0
         psp_count = 0
+        nes_count = 0
+        snes_count = 0
+        n64_count = 0
         total_size = 0
 
         self.log(f"\nFound {len(game_files)} game descriptor file(s):\n")
@@ -3593,6 +4077,70 @@ obtained ROM files.
                 else:
                     self.log(f"   └─ ISO size: {size_mb:.1f} MB")
                 game_size += iso_size
+            elif game_file.suffix.lower() == '.nes':
+                nes_count += 1
+                rom_size = game_file.stat().st_size
+                size_kb = rom_size / 1024
+                self.log(f"🎮 [NES] {game_file.name}")
+                self.log(f"   Path: {game_file}")
+                self.log(f"   └─ ROM size: {size_kb:.1f} KB")
+                
+                # Parse NES header for additional info
+                nes_info = self.parse_nes_header(game_file)
+                if nes_info['valid']:
+                    self.log(f"   └─ Format: {nes_info['format']}")
+                    self.log(f"   └─ Mapper: {nes_info['mapper']}")
+                    self.log(f"   └─ PRG ROM: {nes_info['prg_rom_size']} KB | CHR ROM: {nes_info['chr_rom_size']} KB")
+                    self.log(f"   └─ Mirroring: {nes_info['mirroring']}")
+                    if nes_info['battery']:
+                        self.log(f"   └─ Battery: Yes (save data)")
+                    if nes_info['trainer']:
+                        self.log(f"   └─ Trainer: Yes")
+                    if nes_info['region'] != 'Unknown':
+                        self.log(f"   └─ Region: {nes_info['region']}")
+                
+                game_size += rom_size
+            elif game_file.suffix.lower() in ['.sfc', '.smc', '.snes']:
+                snes_count += 1
+                rom_size = game_file.stat().st_size
+                size_kb = rom_size / 1024
+                self.log(f"🎮 [SNES] {game_file.name}")
+                self.log(f"   Path: {game_file}")
+                self.log(f"   └─ ROM size: {size_kb:.1f} KB")
+                
+                # Parse SNES header for additional info
+                snes_info = self.parse_snes_header(game_file)
+                if snes_info['valid']:
+                    self.log(f"   └─ Title: {snes_info['title']}")
+                    self.log(f"   └─ Mapping: {snes_info['rom_makeup']}")
+                    self.log(f"   └─ Cartridge: {snes_info['rom_type']}")
+                    self.log(f"   └─ Region: {snes_info['region']}")
+                    if snes_info['has_smc_header']:
+                        self.log(f"   └─ SMC Header: Yes (512 bytes)")
+                    self.log(f"   └─ Checksum: {'Valid' if snes_info['checksum_valid'] else 'Invalid'}")
+                    if snes_info['version'] > 0:
+                        self.log(f"   └─ Version: 1.{snes_info['version']}")
+                
+                game_size += rom_size
+            elif game_file.suffix.lower() in ['.n64', '.z64', '.v64']:
+                n64_count += 1
+                rom_size = game_file.stat().st_size
+                size_mb = rom_size / (1024 * 1024)
+                self.log(f"🎮 [N64] {game_file.name}")
+                self.log(f"   Path: {game_file}")
+                self.log(f"   └─ ROM size: {size_mb:.1f} MB")
+                
+                # Parse N64 header for additional info
+                n64_info = self.parse_n64_header(game_file)
+                if n64_info['valid']:
+                    self.log(f"   └─ Title: {n64_info['title']}")
+                    self.log(f"   └─ Game Code: {n64_info['game_code']}")
+                    self.log(f"   └─ Region: {n64_info['region']}")
+                    self.log(f"   └─ Format: {n64_info['byte_order']}")
+                    self.log(f"   └─ CRC1: 0x{n64_info['crc1']:08X}")
+                    self.log(f"   └─ CRC2: 0x{n64_info['crc2']:08X}")
+                
+                game_size += rom_size
             total_size += game_size
             self.log("")
 
@@ -3607,6 +4155,12 @@ obtained ROM files.
             totals_parts.append(f"PS2: {ps2_count}")
         if psp_count > 0:
             totals_parts.append(f"PSP: {psp_count}")
+        if nes_count > 0:
+            totals_parts.append(f"NES: {nes_count}")
+        if snes_count > 0:
+            totals_parts.append(f"SNES: {snes_count}")
+        if n64_count > 0:
+            totals_parts.append(f"N64: {n64_count}")
         self.log(f"Totals: {' | '.join(totals_parts) if totals_parts else 'None'}  Combined: {len(game_files)}")
         if compressed_count > 0:
             self.log(f"📦 Plus {compressed_count} compressed file(s) to extract")
@@ -3623,6 +4177,12 @@ obtained ROM files.
             status_parts.append(f"PS2:{ps2_count}")
         if psp_count > 0:
             status_parts.append(f"PSP:{psp_count}")
+        if nes_count > 0:
+            status_parts.append(f"NES:{nes_count}")
+        if snes_count > 0:
+            status_parts.append(f"SNES:{snes_count}")
+        if n64_count > 0:
+            status_parts.append(f"N64:{n64_count}")
         status_text = f"Found {' '.join(status_parts) if status_parts else 'none'}"
         if compressed_count > 0:
             status_text += f" + {compressed_count} archives"
