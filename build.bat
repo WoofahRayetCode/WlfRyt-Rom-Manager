@@ -31,6 +31,26 @@ set RUNTIME_HOOK=build_timestamp_hook.py
 echo import os>"%RUNTIME_HOOK%"
 echo os.environ.setdefault("BUILD_TIMESTAMP","%BUILD_TIMESTAMP%")>>"%RUNTIME_HOOK%"
 
+REM Check if tkinter is available
+echo Checking for tkinter...
+python -c "import tkinter" >nul 2>&1
+if errorlevel 1 (
+    echo tkinter not found - attempting to install...
+    python -m pip install tk -q >nul 2>&1
+    python -c "import tkinter" >nul 2>&1
+    if errorlevel 1 (
+        echo.
+        echo Error: tkinter is not available.
+        echo Please reinstall Python and ensure "tcl/tk and IDLE" is checked
+        echo during installation, or repair your Python install via the installer.
+        pause
+        exit /b 1
+    )
+    echo tkinter installed successfully
+) else (
+    echo tkinter available
+)
+
 REM Install PyInstaller if not present
 echo Checking for PyInstaller...
 python -m pip list | findstr pyinstaller >nul 2>&1

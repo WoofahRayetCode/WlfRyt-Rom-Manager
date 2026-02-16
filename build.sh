@@ -255,6 +255,204 @@ if ! python3 -m pip list 2>/dev/null | grep -qi psutil; then
 fi
 echo -e "${GREEN}psutil available${NC}"
 
+# Check if tkinter is installed (for GUI)
+# Detect the Python version for package naming (used by install steps and error messages)
+PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info.major)')
+
+# Detect if running on an immutable/atomic OS (Bazzite, Bluefin, Fedora Atomic, etc.)
+IS_IMMUTABLE=false
+if [[ -f /run/ostree-booted ]] || command -v rpm-ostree &> /dev/null; then
+    IS_IMMUTABLE=true
+fi
+
+# Helper: check if system Python (outside any venv) has tkinter
+system_has_tkinter() {
+    # Try common system Python paths directly
+    for sys_python in /usr/bin/python${PY_VERSION} /usr/bin/python${PY_MAJOR} /usr/bin/python3; do
+        if [[ -x "$sys_python" ]]; then
+            if "$sys_python" -c "import tkinter" &> /dev/null; then
+                return 0
+            fi
+            break
+        fi
+    done
+    return 1
+}
+
+# Helper: find system tkinter directory and _tkinter shared object
+find_system_tkinter() {
+    # Search standard system library paths for the tkinter package directory
+    for base in /usr/lib64/python${PY_VERSION} /usr/lib/python${PY_VERSION} \
+                /usr/lib64/python${PY_MAJOR} /usr/lib/python${PY_MAJOR}; do
+        if [[ -d "${base}/tkinter" ]]; then
+            echo "${base}/tkinter"
+            return 0
+        fi
+    done
+    # Fallback: ask system Python directly
+    for sys_python in /usr/bin/python${PY_VERSION} /usr/bin/python${PY_MAJOR} /usr/bin/python3; do
+        if [[ -x "$sys_python" ]]; then
+            local tk_dir
+            tk_dir=$("$sys_python" -c "import tkinter, os; print(os.path.dirname(tkinter.__file__))" 2>/dev/null)
+            if [[ -n "$tk_dir" && -d "$tk_dir" ]]; then
+                echo "$tk_dir"
+                return 0
+            fi
+            break
+        fi
+    done
+    return 1
+}
+
+# Helper: link system tkinter into the active virtual environment
+link_tkinter_to_venv() {
+    local sys_tk_dir="$1"
+    local venv_site
+    venv_site=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null)
+    if [[ -z "$venv_site" ]]; then
+        echo -e "${RED}  Could not determine venv site-packages path${NC}"
+        return 1
+    fi
+
+    echo -e "${CYAN}  Linking system tkinter into virtual environment...${NC}"
+
+    # Link the tkinter package directory
+    ln -sf "$sys_tk_dir" "$venv_site/tkinter"
+    echo "    -> $venv_site/tkinter"
+
+    # Find and link the _tkinter C extension (.so)
+    local parent
+    parent=$(dirname "$sys_tk_dir")
+    local tkinter_so
+    tkinter_so=$(find "$parent" /usr/lib64/python${PY_VERSION} /usr/lib/python${PY_VERSION} \
+                      -maxdepth 2 -name '_tkinter*.so' -print -quit 2>/dev/null)
+    if [[ -n "$tkinter_so" ]]; then
+        # Determine correct lib-dynload directory inside the venv
+        local venv_dynload
+        venv_dynload=$(python3 -c '
+import importlib.machinery, os, sysconfig
+dynload = sysconfig.get_path("platlib")
+# lib-dynload is typically a sibling of the site-packages dir
+candidate = os.path.join(os.path.dirname(dynload), "lib-dynload")
+if not os.path.isdir(candidate):
+    candidate = os.path.join(os.path.dirname(os.path.dirname(dynload)), "lib-dynload")
+print(candidate)' 2>/dev/null)
+        if [[ -z "$venv_dynload" ]]; then
+            venv_dynload="$(dirname "$venv_site")/lib-dynload"
+        fi
+        mkdir -p "$venv_dynload" 2>/dev/null
+        ln -sf "$tkinter_so" "$venv_dynload/"
+        echo "    -> $venv_dynload/$(basename "$tkinter_so")"
+    else
+        echo -e "${YELLOW}  Warning: _tkinter.so not found - tkinter may not work${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}  System tkinter linked into venv successfully${NC}"
+    return 0
+}
+
+if ! python3 -c "import tkinter" &> /dev/null; then
+    echo -e "${YELLOW}tkinter not found - attempting to set up...${NC}"
+
+    # --- Step 1: If in a venv and system already has tkinter, just link it ---
+    if [[ -n "$VIRTUAL_ENV" ]]; then
+        echo "  Virtual environment detected: $VIRTUAL_ENV"
+        if system_has_tkinter; then
+            echo -e "${GREEN}  System Python already has tkinter${NC}"
+            SYS_TK_DIR=$(find_system_tkinter)
+            if [[ -n "$SYS_TK_DIR" ]]; then
+                link_tkinter_to_venv "$SYS_TK_DIR"
+            fi
+        fi
+    fi
+
+    # --- Step 2: If still not available, install the system package ---
+    if ! python3 -c "import tkinter" &> /dev/null; then
+        echo "  Installing tkinter system package..."
+
+        TKINTER_INSTALLED=false
+
+        if [[ "$IS_IMMUTABLE" == true ]]; then
+            # Immutable Fedora-based OS (Bazzite, Bluefin, Fedora Atomic/Silverblue)
+            echo -e "  ${CYAN}Detected immutable OS (ostree/rpm-ostree)${NC}"
+            # Check if python3-tkinter is already layered or in the base image
+            if rpm -q python${PY_MAJOR}-tkinter &> /dev/null; then
+                echo -e "  ${GREEN}python${PY_MAJOR}-tkinter is already installed in the image${NC}"
+                TKINTER_INSTALLED=true
+            else
+                echo "  Layering python${PY_MAJOR}-tkinter via rpm-ostree..."
+                echo -e "  ${YELLOW}Note: This requires a reboot to take effect.${NC}"
+                if sudo rpm-ostree install -y --idempotent python${PY_MAJOR}-tkinter; then
+                    echo -e "  ${YELLOW}Package layered. A reboot is required for it to become available.${NC}"
+                    echo -e "  ${YELLOW}After rebooting, re-run this build script.${NC}"
+                    # Check if it's usable without reboot (rpm-ostree live apply)
+                    if sudo rpm-ostree ex apply-live --allow-replacement 2>/dev/null; then
+                        echo -e "  ${GREEN}Live update applied - no reboot needed!${NC}"
+                        TKINTER_INSTALLED=true
+                    else
+                        echo -e "  ${YELLOW}Could not live-apply. Please reboot and re-run this script.${NC}"
+                        exit 1
+                    fi
+                else
+                    echo -e "${RED}  Failed to layer python${PY_MAJOR}-tkinter${NC}"
+                fi
+            fi
+        elif command -v pacman &> /dev/null; then
+            echo "  Detected pacman (Arch/Manjaro)..."
+            sudo pacman -S --noconfirm --needed tk && TKINTER_INSTALLED=true
+        elif command -v apt-get &> /dev/null; then
+            echo "  Detected apt (Debian/Ubuntu)..."
+            sudo apt-get update -qq && sudo apt-get install -y python${PY_MAJOR}-tk && TKINTER_INSTALLED=true
+        elif command -v dnf &> /dev/null; then
+            echo "  Detected dnf (Fedora/RHEL)..."
+            sudo dnf install -y python${PY_MAJOR}-tkinter && TKINTER_INSTALLED=true
+        elif command -v zypper &> /dev/null; then
+            echo "  Detected zypper (openSUSE)..."
+            sudo zypper install -y python${PY_MAJOR}-tk && TKINTER_INSTALLED=true
+        elif command -v brew &> /dev/null; then
+            echo "  Detected Homebrew (macOS)..."
+            brew install python-tk@${PY_VERSION} && TKINTER_INSTALLED=true
+        fi
+
+        # --- Step 3: After installing system package, link into venv if needed ---
+        if [[ "$TKINTER_INSTALLED" == true && -n "$VIRTUAL_ENV" ]]; then
+            if ! python3 -c "import tkinter" &> /dev/null; then
+                SYS_TK_DIR=$(find_system_tkinter)
+                if [[ -n "$SYS_TK_DIR" ]]; then
+                    link_tkinter_to_venv "$SYS_TK_DIR"
+                fi
+            fi
+        fi
+    fi
+
+    # Final verification
+    if ! python3 -c "import tkinter" &> /dev/null; then
+        echo -e "${RED}Error: Failed to set up tkinter${NC}"
+        echo "Please install tkinter manually for your distribution:"
+        if [[ "$IS_IMMUTABLE" == true ]]; then
+            echo "  Bazzite/Bluefin/Fedora Atomic:"
+            echo "    sudo rpm-ostree install python${PY_MAJOR}-tkinter"
+            echo "    systemctl reboot"
+        fi
+        echo "  Arch/Manjaro:   sudo pacman -S tk"
+        echo "  Debian/Ubuntu:  sudo apt-get install python3-tk"
+        echo "  Fedora/RHEL:    sudo dnf install python3-tkinter"
+        echo "  openSUSE:       sudo zypper install python3-tk"
+        echo "  macOS (Brew):   brew install python-tk@${PY_VERSION}"
+        if [[ -n "$VIRTUAL_ENV" ]]; then
+            echo
+            echo "If your system Python already has tkinter, try recreating the venv with:"
+            echo "  python3 -m venv --system-site-packages $VIRTUAL_ENV"
+        fi
+        exit 1
+    fi
+    echo -e "${GREEN}tkinter set up successfully${NC}"
+else
+    echo -e "${GREEN}tkinter available${NC}"
+fi
+
 # Add ~/.local/bin to PATH if not already there (for user-installed pip packages)
 export PATH="$HOME/.local/bin:$PATH"
 
