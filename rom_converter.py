@@ -186,7 +186,8 @@ class ROMConverter:
     def __init__(self, master):
         self.master = master
         master.title("⚡ ROM CONVERTER ⚡")
-        master.geometry("900x1200")
+        master.geometry("1000x850")
+        master.minsize(900, 700)
         master.resizable(True, True)
         master.configure(bg=COLORS['bg_dark'])
         
@@ -2456,12 +2457,120 @@ obtained ROM files.
         action_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
         action_frame.pack(fill="x")
         
-        Button(action_frame, text="🚀 RUN FULL WORKFLOW", command=run_full_workflow,
+        Button(action_frame, text="✕ CLOSE", command=dialog.destroy,
+               font=self.font_button,
+               activebackground=COLORS['accent_red'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def download_bios_dialog(self):
+        """Open dialog to download and extract BIOS files from GitHub"""
+        dialog = Toplevel(self.master)
+        dialog.title("◄ BIOS DOWNLOADER ►")
+        dialog.geometry("700x550")
+        dialog.resizable(True, True)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="🧬 BIOS DOWNLOADER", font=self.font_heading_md,
+              fg=COLORS['accent_pink'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="Download verified BIOS collection from GitHub (archtaurus/RetroPieBIOS)",
+              font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
+
+        # Destination directory
+        dest_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        dest_frame.pack(fill="x")
+
+        Label(dest_frame, text="📁 Destination:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left")
+        dest_entry = Entry(dest_frame, font=self.font_body,
+                          bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                          insertbackground=COLORS['text_primary'], relief="flat")
+        dest_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
+        
+        # Try to find a good default: RetroArch system folder, or current source dir
+        default_dest = ""
+        if os.name == 'nt': # Windows
+            ra_path = Path.home() / "AppData" / "Roaming" / "RetroArch" / "system"
+            if ra_path.exists():
+                default_dest = str(ra_path)
+        
+        if not default_dest and self.source_dir:
+            default_dest = str(Path(self.source_dir) / "BIOS")
+            
+        dest_entry.insert(0, default_dest)
+
+        def browse_dest():
+            folder = filedialog.askdirectory(title="Select BIOS Extraction Folder")
+            if folder:
+                dest_entry.delete(0, "end")
+                dest_entry.insert(0, folder)
+
+        Button(dest_frame, text="[ BROWSE ]", command=browse_dest,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left")
+
+        # Info text
+        info_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        info_frame.pack(fill="x")
+        
+        info_label = Label(info_frame, text="This will download a ~400MB collection of verified BIOS files\n"
+                                           "organized for various emulators (PS1, PS2, Dreamcast, Saturn, etc.).",
+                           font=self.font_small, fg=COLORS['accent_yellow'], bg=COLORS['bg_dark'], justify="left")
+        info_label.pack(anchor="w")
+
+        # Progress area
+        results_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        results_frame.pack(fill="both", expand=True)
+
+        Label(results_frame, text="◄ OPERATION LOG ►", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(0, 4))
+
+        list_frame = Frame(results_frame, bg=COLORS['bg_dark'])
+        list_frame.pack(fill="both", expand=True)
+
+        scrollbar = Scrollbar(list_frame, bg=COLORS['bg_light'],
+                             troughcolor=COLORS['bg_dark'])
+        scrollbar.pack(side="right", fill="y")
+
+        results_text = Text(list_frame, wrap="word", yscrollcommand=scrollbar.set,
+                           height=15, font=self.font_mono,
+                           bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                           insertbackground=COLORS['text_primary'], relief="flat",
+                           padx=8, pady=8)
+        results_text.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=results_text.yview)
+
+        def log_msg(msg):
+            results_text.insert("end", msg + "\n")
+            results_text.see("end")
+            dialog.update()
+
+        def start_download():
+            dest = dest_entry.get().strip()
+            if not dest:
+                messagebox.showwarning("Warning", "Please specify a destination folder")
+                return
+            
+            # Disable buttons during download
+            download_btn.config(state="disabled")
+            
+            threading.Thread(target=self.download_bios, args=(dest, log_msg, lambda: download_btn.config(state="normal")), daemon=True).start()
+
+        # Action buttons
+        action_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        action_frame.pack(fill="x")
+
+        download_btn = Button(action_frame, text="📥 START DOWNLOAD", command=start_download,
                font=self.font_button,
                bg=COLORS['button_green'], fg=COLORS['bg_dark'],
                activebackground=COLORS['text_primary'],
-               relief="flat", cursor="hand2", padx=20, pady=5).pack(side="left", padx=5)
-        
+               relief="flat", cursor="hand2", padx=20, pady=5)
+        download_btn.pack(side="left", padx=5)
+
         Button(action_frame, text="✕ CLOSE", command=dialog.destroy,
                font=self.font_button,
                activebackground=COLORS['accent_red'],
@@ -2709,7 +2818,7 @@ obtained ROM files.
         self.font_label_bold = tkfont.Font(family=self.font_body_family, size=10, weight="bold")
         self.font_body = tkfont.Font(family=self.font_body_family, size=10)
         self.font_small = tkfont.Font(family=self.font_body_family, size=9)
-        self.font_button = tkfont.Font(family=self.font_body_family, size=11, weight="bold")
+        self.font_button = tkfont.Font(family=self.font_body_family, size=10, weight="bold")
         self.font_status = tkfont.Font(family=self.font_body_family, size=9, weight="bold")
         self.font_mono = tkfont.Font(family=self.font_mono_family, size=9)
 
@@ -2762,8 +2871,13 @@ obtained ROM files.
                 lbl.configure(bg=COLORS['bg_dark'], fg=COLORS['text_secondary'])
 
         # Buttons
-        buttons = [getattr(self, 'scan_button', None), getattr(self, 'convert_button', None),
-                   getattr(self, 'stop_button', None), getattr(self, 'move_chd_button', None)]
+        buttons = [
+            getattr(self, 'scan_button', None), getattr(self, 'convert_button', None),
+            getattr(self, 'stop_button', None), getattr(self, 'move_chd_button', None),
+            getattr(self, 'cleanup_button', None), getattr(self, 'clean_names_button', None),
+            getattr(self, 'extract_archives_button', None), getattr(self, 'decrypt_3ds_button', None),
+            getattr(self, 'bios_download_button', None)
+        ]
         for btn in buttons:
             if btn:
                 btn.configure(activebackground=COLORS['text_primary'])
@@ -3084,79 +3198,91 @@ obtained ROM files.
         Label(concurrent_frame, text=f"(1-{max_cores} cores)", font=cb_font,
               fg=COLORS['text_muted'], bg=cb_bg).pack(side="left", padx=(8, 0))
         
-        # Action buttons
-        button_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        button_frame.pack(fill="x", pady=(0, 8))
+        # Action buttons - Row 1: Primary Actions
+        button_frame_1 = Frame(self.main_frame, bg=COLORS['bg_dark'])
+        button_frame_1.pack(fill="x", pady=(0, 4))
         
-        self.scan_button = Button(button_frame, text="▶ SCAN", 
+        self.scan_button = Button(button_frame_1, text="🔍 SCAN", 
                                  command=self.scan_directory,
                                  font=self.font_button,
                                  bg=COLORS['button_green'], fg=COLORS['bg_dark'],
                                  activebackground=COLORS['text_primary'],
                                  activeforeground=COLORS['bg_dark'],
-                                 relief="flat", cursor="hand2", padx=15, pady=5)
+                                 relief="flat", cursor="hand2", padx=12, pady=4)
         self.scan_button.pack(side="left", padx=(0, 8))
         
-        self.convert_button = Button(button_frame, text="Convert", 
+        self.convert_button = Button(button_frame_1, text="🔥 CONVERT", 
                                     command=self.start_conversion,
                                     font=self.font_button,
                                     bg=COLORS['button_blue'], fg="white",
                                     activebackground=COLORS['text_secondary'],
                                     activeforeground=COLORS['bg_dark'],
                                     disabledforeground=COLORS['text_muted'],
-                                    relief="flat", cursor="hand2", padx=15, pady=5,
+                                    relief="flat", cursor="hand2", padx=12, pady=4,
                                     state="disabled")
         self.convert_button.pack(side="left", padx=(0, 8))
         
-        self.stop_button = Button(button_frame, text="■ STOP", 
+        self.stop_button = Button(button_frame_1, text="■ STOP", 
                                  command=self.stop_conversion,
                                  font=self.font_button,
                                  bg=COLORS['accent_red'], fg="white",
                                  activebackground=COLORS['accent_orange'],
                                  disabledforeground="white",
-                                 relief="flat", cursor="hand2", padx=15, pady=5,
+                                 relief="flat", cursor="hand2", padx=12, pady=4,
                                  state="disabled")
         self.stop_button.pack(side="left", padx=(0, 8))
         
-        self.move_chd_button = Button(button_frame, text="📁 MOVE CHD", 
+        self.move_chd_button = Button(button_frame_1, text="📁 MOVE CHD", 
                                      command=self.move_chd_files_dialog,
                                      font=self.font_button,
                                      bg=COLORS['accent_purple'], fg="white",
                                      activebackground=COLORS['accent_pink'],
-                                     relief="flat", cursor="hand2", padx=15, pady=5)
+                                     relief="flat", cursor="hand2", padx=12, pady=4)
         self.move_chd_button.pack(side="left", padx=(0, 8))
-        
-        self.cleanup_button = Button(button_frame, text="🗑️ CLEANUP", 
+
+        # Action buttons - Row 2: Tools
+        button_frame_2 = Frame(self.main_frame, bg=COLORS['bg_dark'])
+        button_frame_2.pack(fill="x", pady=(0, 8))
+
+        self.cleanup_button = Button(button_frame_2, text="🗑️ CLEANUP", 
                                     command=self.cleanup_compressed_dialog,
                                     font=self.font_button,
                                     bg=COLORS['accent_orange'], fg="white",
                                     activebackground=COLORS['accent_red'],
-                                    relief="flat", cursor="hand2", padx=15, pady=5)
+                                    relief="flat", cursor="hand2", padx=12, pady=4)
         self.cleanup_button.pack(side="left", padx=(0, 8))
         
-        self.clean_names_button = Button(button_frame, text="✨ CLEAN NAMES", 
+        self.clean_names_button = Button(button_frame_2, text="✨ CLEAN NAMES", 
                                         command=self.clean_names_dialog,
                                         font=self.font_button,
                                         bg=COLORS['accent_pink'], fg="white",
                                         activebackground=COLORS['accent_purple'],
-                                        relief="flat", cursor="hand2", padx=15, pady=5)
+                                        relief="flat", cursor="hand2", padx=12, pady=4)
         self.clean_names_button.pack(side="left", padx=(0, 8))
         
-        self.extract_archives_button = Button(button_frame, text="📦 EXTRACT ARCHIVES", 
+        self.extract_archives_button = Button(button_frame_2, text="📦 EXTRACT", 
                                              command=self.extract_archives_dialog,
                                              font=self.font_button,
                                              bg=COLORS['accent_yellow'], fg=COLORS['bg_dark'],
                                              activebackground=COLORS['accent_orange'],
-                                             relief="flat", cursor="hand2", padx=15, pady=5)
+                                             relief="flat", cursor="hand2", padx=12, pady=4)
         self.extract_archives_button.pack(side="left", padx=(0, 8))
         
-        self.decrypt_3ds_button = Button(button_frame, text="🔓 DECRYPT 3DS", 
+        self.decrypt_3ds_button = Button(button_frame_2, text="🔓 3DS DECRYPT", 
                                         command=self.decrypt_3ds_dialog,
                                         font=self.font_button,
                                         bg=COLORS['accent_purple'], fg="white",
                                         activebackground=COLORS['accent_pink'],
-                                        relief="flat", cursor="hand2", padx=15, pady=5)
-        self.decrypt_3ds_button.pack(side="left")
+                                        relief="flat", cursor="hand2", padx=12, pady=4)
+        self.decrypt_3ds_button.pack(side="left", padx=(0, 8))
+
+        self.bios_download_button = Button(button_frame_2, text="🧬 BIOS", 
+                                          command=self.download_bios_dialog,
+                                          font=self.font_button,
+                                          bg=COLORS['accent_pink'], fg="white",
+                                          activebackground=COLORS['accent_red'],
+                                          relief="flat", cursor="hand2", padx=12, pady=4)
+        self.bios_download_button.pack(side="left")
         
         # Progress bar with retro style
         progress_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
