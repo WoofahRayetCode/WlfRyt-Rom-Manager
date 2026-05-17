@@ -94,11 +94,17 @@ if exist dist\ROM_Converter.exe (
     echo  Build Successful!
     echo ==================================================
     echo.
+    echo Copying build to OneDrive Desktop...
+    set "DEST_DIR=%USERPROFILE%\OneDrive\Desktop\ROM Manager"
+    if not exist "!DEST_DIR!" mkdir "!DEST_DIR!"
+    copy /y "dist\ROM_Converter.exe" "!DEST_DIR!\" >nul
+    
     echo Output: dist\ROM_Converter.exe
+    echo Copied to: !DEST_DIR!
     echo.
     echo Next Steps:
-    echo   1. Copy dist\ROM_Converter.exe to your desired location
-    echo   2. Place chdman.exe and maxcso.exe in the same folder
+    echo   1. The app is ready on your Desktop in the "ROM Manager" folder
+    echo   2. Place chdman.exe and maxcso.exe in that same folder
     echo   3. Run ROM_Converter.exe
     echo.
     echo ==================================================
