@@ -2463,7 +2463,7 @@ obtained ROM files.
                relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
 
     def download_bios_dialog(self):
-        """Open dialog to download and extract BIOS files from GitHub"""
+        """Open dialog to download and extract BIOS files from this project's GitHub"""
         dialog = Toplevel(self.master)
         dialog.title("◄ BIOS DOWNLOADER ►")
         dialog.geometry("700x550")
@@ -2477,7 +2477,7 @@ obtained ROM files.
         title_frame.pack(fill="x", padx=10, pady=(10, 10))
         Label(title_frame, text="🧬 BIOS DOWNLOADER", font=self.font_heading_md,
               fg=COLORS['accent_pink'], bg=COLORS['bg_light']).pack()
-        Label(title_frame, text="Download verified BIOS collection from GitHub (archtaurus/RetroPieBIOS)",
+        Label(title_frame, text="Download official BIOS collection from WoofahRayetCode repository",
               font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
 
         # Destination directory
@@ -2491,15 +2491,8 @@ obtained ROM files.
                           insertbackground=COLORS['text_primary'], relief="flat")
         dest_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
         
-        # Try to find a good default: RetroArch system folder, or current source dir
-        default_dest = ""
-        if os.name == 'nt': # Windows
-            ra_path = Path.home() / "AppData" / "Roaming" / "RetroArch" / "system"
-            if ra_path.exists():
-                default_dest = str(ra_path)
-        
-        if not default_dest and self.source_dir:
-            default_dest = str(Path(self.source_dir) / "BIOS")
+        # Try to find a good default: BIOS folder in app directory
+        default_dest = str(self.script_dir / "BIOS")
             
         dest_entry.insert(0, default_dest)
 
@@ -2517,8 +2510,8 @@ obtained ROM files.
         info_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
         info_frame.pack(fill="x")
         
-        info_label = Label(info_frame, text="This will download a ~400MB collection of verified BIOS files\n"
-                                           "organized for various emulators (PS1, PS2, Dreamcast, Saturn, etc.).",
+        info_label = Label(info_frame, text="This will download the BIOS collection from the WoofahRayetCode repository.\n"
+                                           "Files will be organized into system-specific subfolders.",
                            font=self.font_small, fg=COLORS['accent_yellow'], bg=COLORS['bg_dark'], justify="left")
         info_label.pack(anchor="w")
 
@@ -2575,6 +2568,109 @@ obtained ROM files.
                font=self.font_button,
                activebackground=COLORS['accent_red'],
                relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def download_bios(self, dest_dir, log_callback, on_complete):
+        """Download and extract BIOS collection from project repository"""
+        try:
+            repo_url = "https://github.com/WoofahRayetCode/WlfRyt-Rom-Manager/archive/refs/heads/main.zip"
+            dest_path = Path(dest_dir)
+            dest_path.mkdir(parents=True, exist_ok=True)
+            
+            temp_zip = dest_path / "bios_temp.zip"
+            
+            log_callback("🚀 Starting BIOS download...")
+            log_callback(f"🔗 Source: {repo_url}")
+            log_callback(f"📂 Destination: {dest_dir}\n")
+            
+            # Download zip
+            req = urllib.request.Request(repo_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=300) as response:
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+                block_size = 1024 * 1024
+                
+                with open(temp_zip, 'wb') as f:
+                    while True:
+                        buffer = response.read(block_size)
+                        if not buffer:
+                            break
+                        f.write(buffer)
+                        downloaded += len(buffer)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            log_callback(f"   📥 Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                        else:
+                            log_callback(f"   📥 Downloading: {downloaded/(1024*1024):.1f}MB...")
+            
+            log_callback("\n✅ Download complete. Extracting files...")
+            
+            # Extract
+            with zipfile.ZipFile(temp_zip, 'r') as zf:
+                # The repo zip contains a top-level folder "WlfRyt-Rom-Manager-main"
+                # and BIOS files are in "WlfRyt-Rom-Manager-main/BIOS Files/"
+                prefix = "WlfRyt-Rom-Manager-main/BIOS Files/"
+                
+                # Filter members to only include those under the BIOS folder
+                bios_members = [m for m in zf.namelist() if m.startswith(prefix)]
+                
+                if not bios_members:
+                    # Fallback check for branch names or structure changes
+                    log_callback("⚠️ Could not find 'BIOS Files' in ZIP. Checking structure...")
+                    for name in zf.namelist():
+                        if "BIOS Files" in name:
+                            log_callback(f"Found: {name}")
+                
+                extracted_count = 0
+                for member in bios_members:
+                    # Get the path relative to the BIOS folder
+                    rel_path = member[len(prefix):]
+                    if not rel_path: continue
+                    
+                    target = dest_path / rel_path
+                    
+                    if member.endswith('/'):
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with zf.open(member) as source, open(target, "wb") as target_file:
+                            shutil.copyfileobj(source, target_file)
+                        
+                        # Handle nested ZIP files
+                        if target.suffix.lower() == '.zip':
+                            log_callback(f"   📦 Unzipping pack: {rel_path}...")
+                            try:
+                                with zipfile.ZipFile(target, 'r') as nested_zf:
+                                    # Extract to the same directory as the zip
+                                    nested_zf.extractall(target.parent)
+                                # Remove the zip file after extraction
+                                target.unlink()
+                                log_callback(f"   ✅ Unzipped and cleaned: {rel_path}")
+                            except Exception as zip_err:
+                                log_callback(f"   ⚠️ Could not unzip {rel_path}: {zip_err}")
+                        else:
+                            log_callback(f"   📦 Extracted: {rel_path}")
+                        
+                        extracted_count += 1
+            
+            if extracted_count > 0:
+                log_callback(f"\n✨ Successfully extracted {extracted_count} BIOS files!")
+                log_callback(f"📍 Files are located in: {dest_dir}")
+                messagebox.showinfo("Success", f"BIOS collection downloaded and extracted to:\n{dest_dir}")
+            else:
+                log_callback("\n❌ Error: No BIOS files found in the download.")
+                messagebox.showerror("Error", "Failed to find BIOS files in the repository download.")
+            
+            # Cleanup
+            try:
+                temp_zip.unlink()
+            except:
+                pass
+            
+        except Exception as e:
+            log_callback(f"\n❌ Error: {e}")
+            messagebox.showerror("Error", f"Failed to download BIOS:\n{e}")
+        finally:
+            on_complete()
 
     def save_config(self):
         """Save configuration to JSON file"""
