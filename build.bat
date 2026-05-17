@@ -64,6 +64,32 @@ if errorlevel 1 (
     )
 )
 
+REM Install psutil if not present
+echo Checking for psutil...
+python -m pip list | findstr psutil >nul 2>&1
+if errorlevel 1 (
+    echo Installing psutil...
+    python -m pip install psutil -q
+    if errorlevel 1 (
+        echo Warning: Failed to install psutil - resource monitoring may be limited
+    )
+) else (
+    echo psutil available
+)
+
+REM Install requests if not present
+echo Checking for requests...
+python -m pip list | findstr requests >nul 2>&1
+if errorlevel 1 (
+    echo Installing requests...
+    python -m pip install requests -q
+    if errorlevel 1 (
+        echo Warning: Failed to install requests - Internet Archive login will be disabled
+    )
+) else (
+    echo requests available
+)
+
 REM Clean previous builds
 echo Cleaning previous builds...
 if exist dist rmdir /s /q dist >nul 2>&1
@@ -78,6 +104,8 @@ python -m PyInstaller ^
     --windowed ^
     --name=ROM_Converter ^
     --distpath=dist ^
+    --hidden-import=psutil ^
+    --hidden-import=requests ^
     --runtime-hook=%RUNTIME_HOOK% ^
     rom_converter.py
 
