@@ -34,12 +34,30 @@ try:
 except ImportError:
     PSUTIL_AVAILABLE = False
 
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
+try:
+    import docx
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
 # MAME download configuration
 MAME_RELEASE_URL = "https://www.mamedev.org/release.html"
 MAME_GITHUB_RELEASES_API = "https://api.github.com/repos/mamedev/mame/releases/latest"
 
 # NDecrypt download configuration (for 3DS ROM decryption)
 NDECRYPT_GITHUB_RELEASES_API = "https://api.github.com/repos/SabreTools/NDecrypt/releases/latest"
+
+# PS3 Disc Dumper download configuration
+PS3_DISC_DUMPER_GITHUB_RELEASES_API = "https://api.github.com/repos/13xforever/ps3-disc-dumper/releases/latest"
+
+# AutoDecryptPS3 download configuration
+AUTO_DECRYPT_PS3_GITHUB_RELEASES_API = "https://api.github.com/repos/ChrOn0os/AutoDecryptPS3/releases/latest"
 
 # Supported compressed file extensions
 COMPRESSED_EXTENSIONS = {'.zip', '.7z', '.rar', '.gz', '.tar', '.tar.gz', '.tgz'}
@@ -56,6 +74,7 @@ SYSTEM_EXTENSIONS = {
     '.pbp': 'PSP',
     '.cso': 'PSP',
     '.zso': 'PSP',
+    '.iso': 'PlayStation 3', # Will be refined by detect_iso_system
     # Nintendo Handhelds
     '.gb': 'Game Boy',
     '.gbc': 'Game Boy Color',
@@ -82,6 +101,7 @@ SYSTEM_EXTENSIONS = {
     '.nsp': 'Nintendo Switch',
     # Xbox
     '.xiso': 'Xbox',
+    '.iso': 'Xbox/Xbox 360', # Added for detection refinement
     # Sega
     '.md': 'Sega Genesis',
     '.gen': 'Sega Genesis',
@@ -106,9 +126,13 @@ SYSTEM_EXTENSIONS = {
 
 PSP_ID_PATTERNS = ('ulus', 'ules', 'uljm', 'uljs', 'ucus', 'uces', 'uckr', 'ulks')
 PS2_ID_PATTERNS = ('slus', 'sles', 'scus', 'sces', 'slpm', 'slps', 'scps')
+PS3_ID_PATTERNS = ('blus', 'bles', 'bljm', 'bljs', 'bcus', 'bces', 'bcjs', 'bcas', 'mrts')
+
+# Supported PS1 output formats
+PS1_OUTPUT_FORMATS = ['CHD', 'ISO']
 
 # Supported PS2 output formats
-PS2_OUTPUT_FORMATS = ['CHD', 'CSO', 'ZSO']
+PS2_OUTPUT_FORMATS = ['CHD', 'ISO', 'CSO', 'ZSO']
 
 # PS2 emulator presets and their recommended formats
 PS2_EMULATORS = ['PCSX2', 'AetherSX2', 'OPL (PS2)']
@@ -249,6 +273,8 @@ class ROMConverter:
         self.process_ps2_cues = BooleanVar(value=False)  # Toggle for PS2 BIN/CUE processing (CD-based games)
         self.process_ps2_isos = BooleanVar(value=False)  # Toggle for PS2 ISO processing
         self.process_psp_isos = BooleanVar(value=False)  # Toggle for PSP ISO processing
+        self.process_ps3_isos = BooleanVar(value=False)  # Toggle for PS3 ISO processing
+        self.process_xbox_isos = BooleanVar(value=False)  # Toggle for Xbox ISO processing
         self.process_nes_roms = BooleanVar(value=False)  # Toggle for NES ROM processing
         self.process_snes_roms = BooleanVar(value=False)  # Toggle for SNES ROM processing
         self.process_n64_roms = BooleanVar(value=False)  # Toggle for N64 ROM processing
@@ -257,6 +283,10 @@ class ROMConverter:
         self.seven_zip_path = None  # Path to 7z executable for .7z and .rar files
         self.maxcso_path = None  # Path to maxcso executable for CSO/ZSO
         self.ndecrypt_path = None  # Path to NDecrypt executable for 3DS decryption
+        self.ps3_dumper_path = None  # Path to ps3-disc-dumper executable
+        self.auto_decrypt_ps3_path = None  # Path to AutoDecrypt.ps1
+        self.extract_xiso_path = None  # Path to extract-xiso executable
+        self.ps1_output_format = 'CHD'  # Default PS1 output format
         self.ps2_output_format = 'CHD'  # Default PS2 output format
         self.psp_output_format = 'CSO'  # Default PSP output format
         self.ps2_emulator = 'PCSX2'  # Default emulator preference
@@ -286,6 +316,11 @@ class ROMConverter:
         self.chdman_path = None  # Will store path to chdman executable
         self.build_timestamp = self.get_build_timestamp()
         
+        # Archive.org session
+        self.ia_session = None
+        self.ia_username = ""
+        self.ia_s3_keys = None # (access, secret)
+        
         # Progress tracking for crash recovery
         self.progress_file = self.script_dir / ".rom_converter_progress.json"
         self.completed_files = set()  # Track completed conversions
@@ -302,9 +337,32 @@ class ROMConverter:
         # Check for 7-Zip (for .7z and .rar support)
         self.check_7zip()
 
+        # Auto-pull essential dependencies (3DS keys, maxcso)
+        self.auto_pull_dependencies()
+        
+        # Detect and auto-login with IA S3 keys
+        self.detect_ia_keys()
+
         # Check for maxcso (for CSO/ZSO output)
         self.check_maxcso()
         
+        # Check for extract-xiso (for Xbox/Xbox 360 extraction)
+        self.check_extract_xiso()
+        
+        # Check for ps3-disc-dumper
+        if not self.check_ps3_dumper():
+            # Automatically download PS3 Disc Dumper if missing
+            self.download_ps3_dumper()
+        else:
+            # Check for updates
+            self.check_for_ps3_dumper_update()
+
+        # Check for AutoDecryptPS3
+        if not self.check_auto_decrypt_ps3():
+            self.download_auto_decrypt_ps3()
+        else:
+            self.check_for_auto_decrypt_ps3_update()
+
         # Check for chdman
         if not self.check_chdman():
             # Hide main window and force dialog to front on Linux
@@ -367,6 +425,114 @@ class ROMConverter:
         except Exception:
             return "Unknown"
     
+    def auto_pull_dependencies(self):
+        """Automatically download essential project files if missing from app directory"""
+        # Files to check: (filename, remote_url)
+        # Note: raw.githubusercontent.com is used for direct downloads
+        base_url = "https://raw.githubusercontent.com/WoofahRayetCode/WlfRyt-Rom-Manager/main"
+        
+        # 3DS Keys filename has spaces - URL encode them as %20
+        deps = [
+            ("3DS AES Keys.txt", f"{base_url}/3DS%20AES%20Keys.txt"),
+            ("maxcso.exe", f"{base_url}/maxcso.exe"),
+            ("extract-xiso.exe", f"{base_url}/extract-xiso.exe")
+        ]
+        
+        missing = []
+        for filename, url in deps:
+            local_path = self.script_dir / filename
+            if not local_path.exists():
+                missing.append((filename, url, local_path))
+        
+        if not missing:
+            return
+
+        # Perform downloads in a background thread to not block UI startup
+        def run_downloads():
+            for filename, url, local_path in missing:
+                try:
+                    # Use requests if available, fallback to urllib
+                    if REQUESTS_AVAILABLE:
+                        response = requests.get(url, timeout=30)
+                        response.raise_for_status()
+                        with open(local_path, "wb") as f:
+                            f.write(response.content)
+                    else:
+                        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        with urllib.request.urlopen(req, timeout=30) as response:
+                            with open(local_path, "wb") as f:
+                                shutil.copyfileobj(response, f)
+                    
+                    # Log success if UI is ready, otherwise just console
+                    msg = f"✅ Auto-pulled missing dependency: {filename}"
+                    print(msg)
+                    try:
+                        self.log(msg)
+                    except:
+                        pass
+                except Exception as e:
+                    msg = f"⚠️ Failed to auto-pull {filename}: {e}"
+                    print(msg)
+                    try:
+                        self.log(msg)
+                    except:
+                        pass
+                        
+        # Using a daemon thread so it doesn't block closing the app if it hangs
+        threading.Thread(target=run_downloads, daemon=True).start()
+
+    def detect_ia_keys(self):
+        """Scan application directory for .txt or .docx files containing S3 keys"""
+        try:
+            # Check .txt files
+            for txt_file in self.script_dir.glob("*.txt"):
+                if txt_file.name == "3DS AES Keys.txt": continue
+                try:
+                    with open(txt_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    if self._parse_and_login_ia(content):
+                        self.log(f"🔑 Auto-logged into Archive.org using {txt_file.name}")
+                        return True
+                except:
+                    pass
+            
+            # Check .docx files
+            if DOCX_AVAILABLE:
+                for docx_file in self.script_dir.glob("*.docx"):
+                    try:
+                        doc = docx.Document(docx_file)
+                        content = "\n".join([p.text for p in doc.paragraphs])
+                        if self._parse_and_login_ia(content):
+                            self.log(f"🔑 Auto-logged into Archive.org using {docx_file.name}")
+                            return True
+                    except:
+                        pass
+        except Exception as e:
+            print(f"Error during IA key detection: {e}")
+        return False
+
+    def _parse_and_login_ia(self, text):
+        """Extract keys from text and attempt login"""
+        # Look for access_key: [key] and secret_key: [key]
+        access_match = re.search(r'access_key:\s*([a-zA-Z0-9]+)', text, re.IGNORECASE)
+        secret_match = re.search(r'secret_key:\s*([a-zA-Z0-9]+)', text, re.IGNORECASE)
+        
+        if access_match and secret_match:
+            access = access_match.group(1)
+            secret = secret_match.group(1)
+            
+            # Basic verification (quiet)
+            headers = {"Authorization": f"LOW {access}:{secret}"}
+            try:
+                res = requests.get("https://archive.org/metadata/@me", headers=headers, timeout=10)
+                if res.status_code == 200:
+                    self.ia_s3_keys = (access, secret)
+                    self.ia_username = res.json().get('username', 'S3 User')
+                    return True
+            except:
+                pass
+        return False
+
     def check_chdman(self):
         """Check if chdman is available"""
         # Determine platform-specific binary name
@@ -1206,7 +1372,56 @@ class ROMConverter:
             return True
 
         return False
-    
+
+    def check_extract_xiso(self):
+        """Find extract-xiso executable or prompt to download"""
+        # Look in app directory first (portable)
+        app_xiso = self.script_dir / "extract-xiso.exe"
+        if app_xiso.exists():
+            self.extract_xiso_path = str(app_xiso)
+            return True
+            
+        # Check system PATH
+        sys_xiso = shutil.which("extract-xiso")
+        if sys_xiso:
+            self.extract_xiso_path = sys_xiso
+            return True
+            
+        return False
+
+    def extract_xbox_iso(self, iso_path, dest_folder):
+        """Extract Xbox/Xbox 360 ISO using extract-xiso"""
+        if not self.extract_xiso_path:
+            self.log("⚠️  extract-xiso not found. Skipping Xbox extraction.")
+            return False
+            
+        iso_path = Path(iso_path)
+        # Create a subfolder for the game files
+        game_name = iso_path.stem
+        target_dir = Path(dest_folder) / game_name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        try:
+            # extract-xiso -x -d [directory] [iso]
+            cmd = [self.extract_xiso_path, "-x", "-d", str(target_dir), str(iso_path)]
+            
+            # Use idle priority
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = 0x00000040 # IDLE_PRIORITY_CLASS
+                
+            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
+            
+            if result.returncode == 0:
+                self.log(f"✅ Extracted Xbox ISO: {iso_path.name}")
+                return True
+            else:
+                self.log(f"❌ Failed to extract {iso_path.name}: {result.stderr}")
+                return False
+        except Exception as e:
+            self.log(f"❌ Error extracting Xbox ISO {iso_path.name}: {e}")
+            return False
+
     def browse_7zip(self):
         """Allow user to manually select 7z executable"""
         filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
@@ -1501,7 +1716,312 @@ Format Recommendations
             messagebox.showerror("Error", 
                 f"Failed to download NDecrypt:\n{e}\n\n"
                 "Please download manually from:\nhttps://github.com/SabreTools/NDecrypt/releases")
-    
+
+    def check_ps3_dumper(self):
+        """Check if ps3-disc-dumper is available"""
+        # Determine platform-specific binary name
+        dumper_name = "ps3-disc-dumper.exe" if sys.platform == "win32" else "ps3-disc-dumper"
+        
+        # First check bundled resources (PyInstaller)
+        bundled_dumper = self.bundle_dir / dumper_name
+        if bundled_dumper.exists():
+            self.ps3_dumper_path = str(bundled_dumper)
+            return True
+        
+        # Then check for dumper directly next to the executable/script
+        direct_dumper = self.script_dir / dumper_name
+        if direct_dumper.exists():
+            self.ps3_dumper_path = str(direct_dumper)
+            return True
+
+        # Check in a subfolder
+        subfolder_dumper = self.script_dir / "ps3-disc-dumper" / dumper_name
+        if subfolder_dumper.exists():
+            self.ps3_dumper_path = str(subfolder_dumper)
+            return True
+
+        # Check PATH as fallback
+        dumper = shutil.which("ps3-disc-dumper")
+        if dumper:
+            self.ps3_dumper_path = dumper
+            return True
+
+        return False
+
+    def download_ps3_dumper(self):
+        """Download ps3-disc-dumper from GitHub releases"""
+        try:
+            # Determine platform
+            if sys.platform == "win32":
+                asset_pattern = "windows"
+            elif sys.platform == "linux":
+                asset_pattern = "linux"
+            else:
+                return False # Not supported or needs manual
+            
+            self.log("Fetching PS3 Disc Dumper release info from GitHub...")
+            
+            # Get latest release info
+            req = urllib.request.Request(
+                PS3_DISC_DUMPER_GITHUB_RELEASES_API,
+                headers={'User-Agent': 'ROM-Converter'}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                release_data = json.loads(response.read().decode())
+            
+            # Find matching asset
+            download_url = None
+            asset_name = None
+            for asset in release_data.get('assets', []):
+                name = asset.get('name', '').lower()
+                if asset_pattern in name and name.endswith('.zip'):
+                    download_url = asset.get('browser_download_url')
+                    asset_name = asset.get('name')
+                    break
+            
+            if not download_url:
+                self.log(f"⚠️ Could not find PS3 Disc Dumper release for {asset_pattern}")
+                return False
+            
+            self.log(f"Downloading {asset_name}...")
+            
+            # Download the zip
+            zip_path = self.script_dir / asset_name
+            urllib.request.urlretrieve(download_url, zip_path)
+            
+            # Extract
+            self.log("Extracting PS3 Disc Dumper...")
+            extract_dir = self.script_dir / "ps3-disc-dumper"
+            extract_dir.mkdir(exist_ok=True)
+            
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                zf.extractall(extract_dir)
+            
+            # Find the executable
+            if sys.platform == "win32":
+                dumper_exe = extract_dir / "ps3-disc-dumper.exe"
+            else:
+                # Might be inside the zip or have a version name
+                # Look for first file that starts with ps3-disc-dumper
+                dumper_exe = None
+                for f in extract_dir.glob("ps3-disc-dumper*"):
+                    if f.is_file() and not f.suffix == '.zip':
+                        dumper_exe = f
+                        break
+                
+                # Make executable on Linux/Mac
+                if dumper_exe and dumper_exe.exists():
+                    os.chmod(dumper_exe, 0o755)
+            
+            if dumper_exe and dumper_exe.exists():
+                self.ps3_dumper_path = str(dumper_exe)
+                self.save_config()
+                self.log(f"✅ PS3 Disc Dumper installed to: {self.ps3_dumper_path}")
+                
+                # Cleanup zip
+                try:
+                    zip_path.unlink()
+                except:
+                    pass
+                return True
+            else:
+                self.log("❌ Could not find PS3 Disc Dumper executable after extraction")
+                return False
+                
+        except Exception as e:
+            self.log(f"❌ Failed to download PS3 Disc Dumper: {e}")
+            return False
+
+    def get_installed_ps3_dumper_version(self):
+        """Get the version of the currently installed ps3-disc-dumper"""
+        if not self.ps3_dumper_path:
+            return None
+        
+        try:
+            # Most modern versions support --version or similar, but often it's in the filename
+            filename = Path(self.ps3_dumper_path).name
+            version_match = re.search(r'v(\d+\.\d+\.\d+)', filename)
+            if version_match:
+                return version_match.group(1)
+            
+            # If not in name, it might be in the folder name
+            folder_name = Path(self.ps3_dumper_path).parent.name
+            version_match = re.search(r'v(\d+\.\d+\.\d+)', folder_name)
+            if version_match:
+                return version_match.group(1)
+
+        except Exception as e:
+            print(f"Error getting PS3 dumper version: {e}")
+        
+        return None
+
+    def check_for_ps3_dumper_update(self):
+        """Check if a newer version of ps3-disc-dumper is available"""
+        try:
+            installed_version = self.get_installed_ps3_dumper_version()
+            
+            # Fetch latest release info
+            req = urllib.request.Request(
+                PS3_DISC_DUMPER_GITHUB_RELEASES_API,
+                headers={'User-Agent': 'ROM-Converter'}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                release_data = json.loads(response.read().decode())
+            
+            latest_version = release_data.get('tag_name', '').strip('v')
+            
+            if not installed_version or latest_version != installed_version:
+                self.log(f"ℹ️ PS3 Disc Dumper update available: {latest_version} (Current: {installed_version or 'Unknown'})")
+                # Automatically download updates since the user requested update check at launch
+                self.download_ps3_dumper()
+        except Exception as e:
+            print(f"Error checking for PS3 dumper update: {e}")
+
+    def check_auto_decrypt_ps3(self):
+        """Check if AutoDecrypt.ps1 is available"""
+        script_name = "AutoDecrypt.ps1"
+        
+        # Check in a subfolder
+        subfolder_script = self.script_dir / "ps3-auto-decrypt" / script_name
+        if subfolder_script.exists():
+            self.auto_decrypt_ps3_path = str(subfolder_script)
+            return True
+
+        # Check directly next to the executable/script
+        direct_script = self.script_dir / script_name
+        if direct_script.exists():
+            self.auto_decrypt_ps3_path = str(direct_script)
+            return True
+
+        return False
+
+    def download_auto_decrypt_ps3(self):
+        """Download AutoDecrypt.ps1 from GitHub releases"""
+        if sys.platform != "win32":
+            return False
+            
+        try:
+            self.log("Fetching AutoDecryptPS3 release info from GitHub...")
+            
+            # Get latest release info
+            req = urllib.request.Request(
+                AUTO_DECRYPT_PS3_GITHUB_RELEASES_API,
+                headers={'User-Agent': 'ROM-Converter'}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                release_data = json.loads(response.read().decode())
+            
+            # Find matching asset (AutoDecrypt.ps1)
+            download_url = None
+            asset_name = None
+            for asset in release_data.get('assets', []):
+                name = asset.get('name', '')
+                if name.endswith('.ps1'):
+                    download_url = asset.get('browser_download_url')
+                    asset_name = name
+                    break
+            
+            if not download_url:
+                self.log(f"⚠️ Could not find AutoDecrypt.ps1 release asset")
+                return False
+            
+            self.log(f"Downloading {asset_name}...")
+            
+            # Create subfolder
+            extract_dir = self.script_dir / "ps3-auto-decrypt"
+            extract_dir.mkdir(exist_ok=True)
+            
+            # Download the script
+            script_path = extract_dir / "AutoDecrypt.ps1"
+            urllib.request.urlretrieve(download_url, script_path)
+            
+            self.auto_decrypt_ps3_path = str(script_path)
+            # Store the version in a file since it's just a script
+            version_file = extract_dir / "version.txt"
+            with open(version_file, "w") as f:
+                f.write(release_data.get('tag_name', ''))
+                
+            self.save_config()
+            self.log(f"✅ AutoDecryptPS3 installed to: {self.auto_decrypt_ps3_path}")
+            return True
+                
+        except Exception as e:
+            self.log(f"❌ Failed to download AutoDecryptPS3: {e}")
+            return False
+
+    def get_installed_auto_decrypt_ps3_version(self):
+        """Get the version of the currently installed AutoDecryptPS3"""
+        if not self.auto_decrypt_ps3_path:
+            return None
+        
+        try:
+            version_file = Path(self.auto_decrypt_ps3_path).parent / "version.txt"
+            if version_file.exists():
+                return version_file.read_text().strip().strip('v')
+        except Exception:
+            pass
+        
+        return None
+
+    def check_for_auto_decrypt_ps3_update(self):
+        """Check if a newer version of AutoDecryptPS3 is available"""
+        if sys.platform != "win32":
+            return
+
+        try:
+            installed_version = self.get_installed_auto_decrypt_ps3_version()
+            
+            # Fetch latest release info
+            req = urllib.request.Request(
+                AUTO_DECRYPT_PS3_GITHUB_RELEASES_API,
+                headers={'User-Agent': 'ROM-Converter'}
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                release_data = json.loads(response.read().decode())
+            
+            latest_version = release_data.get('tag_name', '').strip('v')
+            
+            if not installed_version or latest_version != installed_version:
+                self.log(f"ℹ️ AutoDecryptPS3 update available: {latest_version} (Current: {installed_version or 'Unknown'})")
+                self.download_auto_decrypt_ps3()
+        except Exception as e:
+            print(f"Error checking for AutoDecryptPS3 update: {e}")
+
+    def run_auto_decrypt_ps3(self):
+        """Trigger the AutoDecryptPS3 script"""
+        if not self.auto_decrypt_ps3_path:
+            if self.download_auto_decrypt_ps3():
+                pass
+            else:
+                messagebox.showerror("Error", "AutoDecryptPS3 script not found and could not be downloaded.")
+                return
+        
+        try:
+            # Open the script directory or the source directory?
+            # User might want to run it in their ROM folder
+            source = self.source_dir or str(self.script_dir)
+            
+            # Confirm with user
+            response = messagebox.askyesno("AutoDecrypt PS3", 
+                f"This will launch AutoDecrypt.ps1 in a PowerShell window.\n\n"
+                f"Source: {source}\n\n"
+                "Note: You may need to copy the script to your ROM folder if it doesn't work from here.\n"
+                "Continue?")
+            
+            if not response:
+                return
+
+            # Launch PowerShell with execution policy bypass
+            cmd = ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-File", self.auto_decrypt_ps3_path]
+            
+            # We want it to run in the source directory if it exists
+            subprocess.Popen(cmd, cwd=source if os.path.isdir(source) else None)
+            self.log("✅ AutoDecryptPS3 launched in PowerShell window.")
+            
+        except Exception as e:
+            self.log(f"❌ Failed to launch AutoDecryptPS3: {e}")
+            messagebox.showerror("Error", f"Failed to launch AutoDecryptPS3:\n{e}")
+
     def find_aes_keys_file(self):
         """Find the bundled or local 3DS AES Keys file"""
         possible_locations = [
@@ -2672,6 +3192,784 @@ obtained ROM files.
         finally:
             on_complete()
 
+    def ia_login_dialog(self, on_success=None):
+        """Open dialog to log in to Internet Archive"""
+        if not REQUESTS_AVAILABLE:
+            messagebox.showerror("Error", "Requests library not found. Login disabled.")
+            return
+
+        dialog = Toplevel(self.master)
+        dialog.title("🔑 ARCHIVE.ORG LOGIN")
+        dialog.geometry("400x300")
+        dialog.resizable(False, False)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="🔑 ARCHIVE.ORG LOGIN", font=self.font_heading_md,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="Required for restricted/locked collections",
+              font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
+
+        fields_frame = Frame(dialog, padx=20, pady=10, bg=COLORS['bg_dark'])
+        fields_frame.pack(fill="both", expand=True)
+
+        Label(fields_frame, text="Email:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w")
+        email_entry = Entry(fields_frame, font=self.font_body,
+                           bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                           insertbackground=COLORS['text_primary'], relief="flat")
+        email_entry.pack(fill="x", pady=(2, 10), ipady=3)
+        email_entry.focus_set()
+
+        Label(fields_frame, text="Password:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w")
+        pass_entry = Entry(fields_frame, font=self.font_body, show="*",
+                          bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                          insertbackground=COLORS['text_primary'], relief="flat")
+        pass_entry.pack(fill="x", pady=(2, 10), ipady=3)
+
+        status_label = Label(fields_frame, text="", font=self.font_small,
+                            bg=COLORS['bg_dark'], fg=COLORS['accent_orange'])
+        status_label.pack(pady=5)
+
+        def do_login():
+            email = email_entry.get().strip()
+            password = pass_entry.get().strip()
+            if not email or not password:
+                status_label.config(text="⚠️ Please enter both email and password")
+                return
+
+            status_label.config(text="⌛ Logging in...", fg=COLORS['text_secondary'])
+            dialog.update()
+
+            success, msg = self.ia_login(email, password)
+            if success:
+                status_label.config(text=f"✅ {msg}", fg=COLORS['button_green'])
+                dialog.after(1000, dialog.destroy)
+                if on_success:
+                    on_success()
+            else:
+                status_label.config(text=f"❌ {msg}", fg=COLORS['accent_red'])
+
+        btn_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        btn_frame.pack(fill="x")
+        Button(btn_frame, text="🔑 LOGIN", command=do_login,
+               font=self.font_button, bg=COLORS['button_blue'], fg="white",
+               relief="flat", cursor="hand2", padx=20, pady=5).pack(side="left", padx=5)
+        Button(btn_frame, text="✕ CANCEL", command=dialog.destroy,
+               font=self.font_button, bg=COLORS['bg_light'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def ia_s3_login_dialog(self, on_success=None):
+        """Open dialog to authenticate using Archive.org S3 keys"""
+        dialog = Toplevel(self.master)
+        dialog.title("🔑 IA S3 KEYS AUTHENTICATION")
+        dialog.geometry("450x350")
+        dialog.resizable(False, False)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="🔑 IA S3 KEYS", font=self.font_heading_md,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="Get keys from archive.org/account/s3.php",
+              font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
+
+        fields_frame = Frame(dialog, padx=20, pady=10, bg=COLORS['bg_dark'])
+        fields_frame.pack(fill="both", expand=True)
+
+        Label(fields_frame, text="Access Key:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w")
+        access_entry = Entry(fields_frame, font=self.font_body,
+                            bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                            insertbackground=COLORS['text_primary'], relief="flat")
+        access_entry.pack(fill="x", pady=(2, 10), ipady=3)
+
+        Label(fields_frame, text="Secret Key:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w")
+        secret_entry = Entry(fields_frame, font=self.font_body, show="*",
+                            bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                            insertbackground=COLORS['text_primary'], relief="flat")
+        secret_entry.pack(fill="x", pady=(2, 10), ipady=3)
+
+        def do_auth():
+            access = access_entry.get().strip()
+            secret = secret_entry.get().strip()
+            if not access or not secret:
+                messagebox.showwarning("Warning", "Please enter both keys")
+                return
+
+            headers = {"Authorization": f"LOW {access}:{secret}"}
+            try:
+                res = requests.get("https://archive.org/metadata/@me", headers=headers, timeout=15)
+                if res.status_code == 200:
+                    self.ia_s3_keys = (access, secret)
+                    self.ia_username = res.json().get('username', 'S3 User')
+                    self.ia_session = None
+                    messagebox.showinfo("Success", f"Authenticated as {self.ia_username}")
+                    dialog.destroy()
+                    if on_success: on_success()
+                else:
+                    messagebox.showerror("Error", "Invalid S3 keys")
+            except Exception as e:
+                messagebox.showerror("Error", f"Connection error: {e}")
+
+        btn_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        btn_frame.pack(fill="x")
+        Button(btn_frame, text="✅ AUTHENTICATE", command=do_auth,
+               font=self.font_button, bg=COLORS['button_blue'], fg="white",
+               relief="flat", cursor="hand2", padx=20, pady=5).pack(side="left", padx=5)
+        Button(btn_frame, text="✕ CANCEL", command=dialog.destroy,
+               font=self.font_button, bg=COLORS['bg_light'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def ia_login(self, email, password):
+        """Perform login to Archive.org and store session"""
+        try:
+            session = requests.Session()
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            }
+            login_url = "https://archive.org/account/login"
+            session.get(login_url, headers=headers, timeout=30)
+            data = {
+                "username": email,
+                "password": password,
+                "remember": "checked",
+                "submit_by_js": "true",
+                "submit-to-login": "Log in"
+            }
+            headers['Referer'] = login_url
+            response = session.post(login_url, data=data, headers=headers, timeout=30)
+            if 'logged-in-sig' in session.cookies or 'logged-in-user' in session.cookies:
+                self.ia_session = session
+                self.ia_username = email
+                return True, "Login successful!"
+            
+            xauth_url = "https://archive.org/services/xauthn/"
+            xauth_data = {"username": email, "password": password}
+            response = session.post(xauth_url, data=xauth_data, headers=headers, timeout=30)
+            if 'logged-in-sig' in session.cookies or 'logged-in-user' in session.cookies:
+                self.ia_session = session
+                self.ia_username = email
+                return True, "Login successful via service!"
+            return False, "Invalid credentials. If you have 2FA enabled, please use S3 Keys instead."
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
+
+    def run_ia_downloads(self, games, dest_dir, status_label, progress_bar, on_complete):
+        """Handle IA downloads in sequence"""
+        total = len(games)
+        for i, game in enumerate(games, 1):
+            name = game['name']
+            identifier = game['identifier']
+            encoded_name = urllib.parse.quote(name)
+            url = f"https://archive.org/download/{identifier}/{encoded_name}"
+            dest_path = Path(dest_dir) / name
+            def update_status(msg):
+                status_label.config(text=f"[{i}/{total}] {msg}")
+                self.master.update_idletasks()
+            update_status(f"Starting: {name}")
+            try:
+                if self.ia_session:
+                    with self.ia_session.get(url, stream=True, timeout=300) as response:
+                        response.raise_for_status()
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(dest_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=1024*1024):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total_size > 0:
+                                        percent = (downloaded / total_size) * 100
+                                        progress_bar['value'] = percent
+                                        update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                                    else:
+                                        update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB...")
+                elif self.ia_s3_keys:
+                    access, secret = self.ia_s3_keys
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Authorization': f'LOW {access}:{secret}'})
+                    with urllib.request.urlopen(req, timeout=300) as response:
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(dest_path, 'wb') as f:
+                            while True:
+                                chunk = response.read(1024*1024)
+                                if not chunk: break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    percent = (downloaded / total_size) * 100
+                                    progress_bar['value'] = percent
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                                else:
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB...")
+                else:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=300) as response:
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(dest_path, 'wb') as f:
+                            while True:
+                                chunk = response.read(1024*1024)
+                                if not chunk: break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    percent = (downloaded / total_size) * 100
+                                    progress_bar['value'] = percent
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                                else:
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB...")
+                update_status(f"✅ Finished: {name}")
+                time.sleep(0.5)
+            except Exception as e:
+                update_status(f"❌ Error: {e}")
+                if messagebox.askretrycancel("Download Error", f"Failed to download {name}:\n{e}\n\nRetry?"):
+                    self.run_ia_downloads(games[i-1:], dest_dir, status_label, progress_bar, on_complete)
+                    return
+        status_label.config(text=f"🎉 Completed {total} download(s)!")
+        progress_bar['value'] = 0
+        messagebox.showinfo("Success", f"Successfully downloaded {total} game(s)")
+        on_complete()
+
+    def check_extract_xiso(self):
+        """Find extract-xiso executable or prompt to download"""
+        app_xiso = self.script_dir / "extract-xiso.exe"
+        if app_xiso.exists():
+            self.extract_xiso_path = str(app_xiso)
+            return True
+        sys_xiso = shutil.which("extract-xiso")
+        if sys_xiso:
+            self.extract_xiso_path = sys_xiso
+            return True
+        return False
+
+    def extract_xbox_iso(self, iso_path, dest_folder):
+        """Extract Xbox/Xbox 360 ISO using extract-xiso"""
+        if not self.extract_xiso_path:
+            self.log("⚠️  extract-xiso not found. Skipping Xbox extraction.")
+            return False
+        iso_path = Path(iso_path)
+        game_name = iso_path.stem
+        target_dir = Path(dest_folder) / game_name
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cmd = [self.extract_xiso_path, "-x", "-d", str(target_dir), str(iso_path)]
+            creationflags = 0x00000040 if sys.platform == "win32" else 0
+            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
+            if result.returncode == 0:
+                self.log(f"✅ Extracted Xbox ISO: {iso_path.name}")
+                return True
+            else:
+                self.log(f"❌ Failed to extract {iso_path.name}: {result.stderr}")
+                return False
+        except Exception as e:
+            self.log(f"❌ Error extracting Xbox ISO {iso_path.name}: {e}")
+            return False
+
+    def ia_login_dialog(self, on_success=None):
+        """Open dialog to log in to Internet Archive"""
+        if not REQUESTS_AVAILABLE:
+            messagebox.showerror("Error", "Requests library not found. Login disabled.")
+            return
+
+        dialog = Toplevel(self.master)
+        dialog.title("🔑 ARCHIVE.ORG LOGIN")
+        dialog.geometry("400x300")
+        dialog.resizable(False, False)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="🔑 ARCHIVE.ORG LOGIN", font=self.font_heading_md,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_light']).pack()
+        Label(title_frame, text="Required for restricted/locked collections",
+              font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack()
+
+        # Input fields
+        fields_frame = Frame(dialog, padx=20, pady=10, bg=COLORS['bg_dark'])
+        fields_frame.pack(fill="both", expand=True)
+
+        Label(fields_frame, text="Email:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w")
+        email_entry = Entry(fields_frame, font=self.font_body,
+                           bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                           insertbackground=COLORS['text_primary'], relief="flat")
+        email_entry.pack(fill="x", pady=(2, 10), ipady=3)
+        email_entry.focus_set()
+
+        Label(fields_frame, text="Password:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w")
+        pass_entry = Entry(fields_frame, font=self.font_body, show="*",
+                          bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                          insertbackground=COLORS['text_primary'], relief="flat")
+        pass_entry.pack(fill="x", pady=(2, 10), ipady=3)
+
+        status_label = Label(fields_frame, text="", font=self.font_small,
+                            bg=COLORS['bg_dark'], fg=COLORS['accent_orange'])
+        status_label.pack(pady=5)
+
+        def do_login():
+            email = email_entry.get().strip()
+            password = pass_entry.get().strip()
+            if not email or not password:
+                status_label.config(text="⚠️ Please enter both email and password")
+                return
+
+            status_label.config(text="⌛ Logging in...", fg=COLORS['text_secondary'])
+            dialog.update()
+
+            success, msg = self.ia_login(email, password)
+            if success:
+                status_label.config(text=f"✅ {msg}", fg=COLORS['button_green'])
+                dialog.after(1000, dialog.destroy)
+                if on_success:
+                    on_success()
+            else:
+                status_label.config(text=f"❌ {msg}", fg=COLORS['accent_red'])
+
+        # Action buttons
+        btn_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        btn_frame.pack(fill="x")
+
+        Button(btn_frame, text="🔑 LOGIN", command=do_login,
+               font=self.font_button, bg=COLORS['button_blue'], fg="white",
+               relief="flat", cursor="hand2", padx=20, pady=5).pack(side="left", padx=5)
+
+        Button(btn_frame, text="✕ CANCEL", command=dialog.destroy,
+               font=self.font_button, bg=COLORS['bg_light'],
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+    def ia_browser_dialog(self):
+        """Open generic Archive.org browser for multiple systems and collections"""
+        dialog = Toplevel(self.master)
+        dialog.title("◄ INTERNET ARCHIVE ROM BROWSER ►")
+        dialog.geometry("1100x850")
+        dialog.resizable(True, True)
+        dialog.transient(self.master)
+        dialog.grab_set()
+        dialog.configure(bg=COLORS['bg_dark'])
+
+        # Data Mapping
+        def get_collections():
+            fmt = self.ia_download_format.get()
+            
+            # Base collections available in both or specific formats
+            collections = {
+                "Sony": {
+                    "PlayStation Portable (Redump USA)": {
+                        "pattern": "sony_psp_usa_202205",
+                        "parts": ["Full Collection"]
+                    }
+                },
+                "Nintendo": {
+                    "Nintendo 64 (BigEndian Z64)": {
+                        "pattern": "Nintendo_64_USA_2020_08_02",
+                        "parts": ["Full Collection"]
+                    },
+                    "NES (No-Intro 2021)": {
+                        "pattern": "nintendo-entertainment-system-no-intro-2021-08-04",
+                        "parts": ["Full Collection"]
+                    },
+                    "SNES (No-Intro 2021)": {
+                        "pattern": "super-nintendo-entertainment-system-no-intro-2021-08-04",
+                        "parts": ["Full Collection"]
+                    }
+                },
+                "Microsoft": {
+                    "Xbox (Redump USA)": {
+                        "pattern": "xbox_redump_usa",
+                        "parts": ["Full Collection"]
+                    }
+                }
+            }
+
+            # Format-specific additions
+            if fmt == "CHD":
+                collections["Sony"]["PlayStation 1 (Redump CHD)"] = {
+                    "pattern": "psx-chd-roms-{part}",
+                    "parts": list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                }
+                collections["Sony"]["PlayStation 2 (Redump USA CHD)"] = {
+                    "pattern": "ps2-redump-usa-chd-part-{part}",
+                    "parts": ["0-9", "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"],
+                    "overrides": {"G": "g_202207", "0-9": "0"}
+                }
+                collections["Nintendo"]["GameCube (Redump USA CHD)"] = {
+                    "pattern": "nintendo-gamecube_202212",
+                    "parts": ["Full Collection"]
+                }
+                collections["Nintendo"]["Wii (Redump USA RVZ)"] = {
+                    "pattern": "wii-redump-usa-rvz-part{part}",
+                    "parts": ["1", "2", "3", "4", "5", "6", "7"]
+                }
+            else: # ISO/BIN
+                collections["Sony"]["PlayStation 1 (Redump USA BIN/CUE)"] = {
+                    "pattern": "Redump_PSX_2021_06_04_{part}",
+                    "parts": list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+                }
+                collections["Sony"]["PlayStation 2 (Redump USA ISO)"] = {
+                    "pattern": "ps2usaredump{part}",
+                    "parts": ["1", "2", "3"]
+                }
+                collections["Nintendo"]["GameCube (Redump USA ISO)"] = {
+                    "pattern": "GameCube_USA_Redump_2021-08-11",
+                    "parts": ["Full Collection"]
+                }
+                collections["Nintendo"]["Wii (Redump USA ISO)"] = {
+                    "pattern": "Wii_USA_Redump_2022-07-28",
+                    "parts": ["Full Collection"]
+                }
+            
+            return collections
+
+        # Title
+        title_frame = Frame(dialog, bg=COLORS['bg_light'], pady=6)
+        title_frame.pack(fill="x", padx=10, pady=(10, 10))
+        Label(title_frame, text="🌐 INTERNET ARCHIVE BROWSER", font=self.font_heading_md,
+              fg=COLORS['button_blue'], bg=COLORS['bg_light']).pack()
+
+        # Login Status Frame
+        login_info_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        login_info_frame.pack(fill="x")
+        
+        status_color = COLORS['button_green'] if (self.ia_session or self.ia_s3_keys) else COLORS['accent_red']
+        auth_type = "S3 Keys" if self.ia_s3_keys else "Form Session" if self.ia_session else "None"
+        status_text = f"Authenticated via {auth_type}: {self.ia_username}" if (self.ia_session or self.ia_s3_keys) else "⚠️ NOT LOGGED IN - Restricted collections will fail"
+        
+        login_status_label = Label(login_info_frame, text=status_text, font=self.font_label_bold,
+                                 fg=status_color, bg=COLORS['bg_dark'])
+        login_status_label.pack(side="left")
+        
+        def update_login_ui():
+            s_color = COLORS['button_green'] if (self.ia_session or self.ia_s3_keys) else COLORS['accent_red']
+            a_type = "S3 Keys" if self.ia_s3_keys else "Form Session" if self.ia_session else "None"
+            s_text = f"Authenticated via {a_type}: {self.ia_username}" if (self.ia_session or self.ia_s3_keys) else "⚠️ NOT LOGGED IN - Restricted collections will fail"
+            login_status_label.config(text=s_text, fg=s_color)
+
+        Button(login_info_frame, text="🔑 S3 KEYS (DEFAULT)", 
+              command=lambda: self.ia_s3_login_dialog(update_login_ui),
+              font=self.font_small, bg=COLORS['accent_yellow'],
+              fg=COLORS['bg_dark'], relief="flat", cursor="hand2", padx=10).pack(side="right", padx=5)
+        
+        Button(login_info_frame, text="🔑 FORM LOGIN", 
+              command=lambda: self.ia_login_dialog(update_login_ui),
+              font=self.font_small, bg=COLORS['bg_medium'],
+              fg=COLORS['text_secondary'], relief="flat", cursor="hand2", padx=10).pack(side="right")
+
+        # Selection Frame
+        selection_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_light'])
+        selection_frame.pack(fill="x", padx=10, pady=5)
+
+        # Format Toggle (CHD vs ISO)
+        format_frame = Frame(selection_frame, bg=COLORS['bg_light'])
+        format_frame.pack(side="left", padx=(0, 20))
+        Label(format_frame, text="Format:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack(side="left")
+        
+        self.ia_download_format = StringVar(value="CHD")
+        
+        def on_format_change():
+            # Refresh system collections based on format
+            on_system_change()
+
+        Radiobutton(format_frame, text="CHD", variable=self.ia_download_format, value="CHD",
+                   command=on_format_change, bg=COLORS['bg_light'], fg=COLORS['text_primary'],
+                   activebackground=COLORS['bg_light'], selectcolor=COLORS['bg_light'],
+                   font=self.font_small).pack(side="left", padx=5)
+        Radiobutton(format_frame, text="ISO/BIN", variable=self.ia_download_format, value="ISO",
+                   command=on_format_change, bg=COLORS['bg_light'], fg=COLORS['text_primary'],
+                   activebackground=COLORS['bg_light'], selectcolor=COLORS['bg_light'],
+                   font=self.font_small).pack(side="left", padx=5)
+
+        # System Select
+        Label(selection_frame, text="System:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack(side="left")
+        system_combo = ttk.Combobox(selection_frame, values=list(get_collections().keys()), state="readonly", width=12)
+        system_combo.set("Sony")
+        system_combo.pack(side="left", padx=5)
+
+        # Console Select
+        Label(selection_frame, text="Collection:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack(side="left", padx=(10, 0))
+        console_combo = ttk.Combobox(selection_frame, state="readonly", width=35)
+        console_combo.pack(side="left", padx=5)
+
+        # Part Select
+        Label(selection_frame, text="Part:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack(side="left", padx=(10, 0))
+        part_combo = ttk.Combobox(selection_frame, state="readonly", width=10)
+        part_combo.pack(side="left", padx=5)
+
+        # Search
+        Label(selection_frame, text="🔍 Search:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack(side="left", padx=(10, 0))
+        search_entry = Entry(selection_frame, font=self.font_body,
+                            bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                            insertbackground=COLORS['text_primary'], relief="flat", width=20)
+        search_entry.pack(side="left", padx=5, ipady=2)
+
+        # Folder frame
+        folder_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        folder_frame.pack(fill="x")
+        Label(folder_frame, text="📁 Save to:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left")
+        dest_entry = Entry(folder_frame, font=self.font_body,
+                          bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                          insertbackground=COLORS['text_primary'], relief="flat")
+        dest_entry.pack(side="left", fill="x", expand=True, padx=5, ipady=3)
+        default_dest = self.source_dir or str(self.script_dir / "Downloads")
+        dest_entry.insert(0, default_dest)
+
+        def browse_dest():
+            folder = filedialog.askdirectory(title="Select Download Folder")
+            if folder:
+                dest_entry.delete(0, "end")
+                dest_entry.insert(0, folder)
+        Button(folder_frame, text="[ BROWSE ]", command=browse_dest,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left")
+
+        # Game List
+        list_frame = Frame(dialog, padx=10, pady=5, bg=COLORS['bg_dark'])
+        list_frame.pack(fill="both", expand=True)
+        columns = ("name", "size")
+        tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="extended")
+        tree.heading("name", text="Filename")
+        tree.heading("size", text="Size")
+        tree.column("name", width=700)
+        tree.column("size", width=120, anchor="e")
+        tree_scroll = Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+
+        # Status
+        progress_bar = ttk.Progressbar(dialog, mode='determinate', length=1000)
+        progress_bar.pack(fill="x", padx=10, pady=2)
+        status_var = Label(dialog, text="Ready", font=self.font_small, bg=COLORS['bg_dark'], fg=COLORS['text_muted'], anchor="w")
+        status_var.pack(fill="x", padx=10)
+
+        all_items = []
+
+        def on_system_change(event=None):
+            sys_name = system_combo.get()
+            collections = get_collections()
+            consoles = list(collections[sys_name].keys())
+            console_combo.config(values=consoles)
+            console_combo.set(consoles[0])
+            on_console_change()
+
+        def on_console_change(event=None):
+            sys_name = system_combo.get()
+            con_name = console_combo.get()
+            collections = get_collections()
+            parts = collections[sys_name][con_name]["parts"]
+            part_combo.config(values=parts)
+            part_combo.set(parts[0])
+            load_list()
+
+        def load_list(event=None):
+            sys_name = system_combo.get()
+            con_name = console_combo.get()
+            part = part_combo.get()
+            
+            collections = get_collections()
+            coll_data = collections[sys_name][con_name]
+            pattern = coll_data["pattern"]
+            
+            # Apply overrides
+            part_val = part
+            if "overrides" in coll_data and part in coll_data["overrides"]:
+                part_val = coll_data["overrides"][part]
+            
+            if "{part}" in pattern:
+                identifier = pattern.replace("{part}", part_val)
+            else:
+                identifier = pattern
+            
+            url = f"https://archive.org/metadata/{identifier}"
+            status_var.config(text=f"Fetching metadata for {identifier}...")
+            dialog.update()
+
+            try:
+                if self.ia_session:
+                    response = self.ia_session.get(url, timeout=30)
+                    response.raise_for_status()
+                    data = response.json()
+                elif self.ia_s3_keys:
+                    access, secret = self.ia_s3_keys
+                    req = urllib.request.Request(url, headers={
+                        'User-Agent': 'Mozilla/5.0',
+                        'Authorization': f'LOW {access}:{secret}'
+                    })
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        data = json.loads(response.read().decode())
+                else:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        data = json.loads(response.read().decode())
+                
+                all_items.clear()
+                for f in data.get('files', []):
+                    # Filter out metadata files
+                    if f['name'].lower().endswith(('.chd', '.iso', '.rvz', '.z64', '.nes', '.sfc', '.smc', '.snes', '.n64', '.v64')):
+                        size_bytes = int(f.get('size', 0))
+                        size_str = f"{size_bytes / (1024*1024):.1f} MB" if size_bytes < 1024*1024*1024 else f"{size_bytes / (1024*1024*1024):.2f} GB"
+                        all_items.append({
+                            "name": f['name'],
+                            "size": size_str,
+                            "identifier": identifier
+                        })
+                
+                update_view()
+                status_var.config(text=f"Loaded {len(all_items)} items from {identifier}")
+            except Exception as e:
+                status_var.config(text=f"Error: {e}")
+
+        def update_view(event=None):
+            query = search_entry.get().lower()
+            for item in tree.get_children(): tree.delete(item)
+            filtered = [i for i in all_items if query in i['name'].lower()]
+            for i in filtered:
+                tree.insert("", "end", values=(i['name'], i['size']), tags=(i['identifier'],))
+
+        system_combo.bind("<<ComboboxSelected>>", on_system_change)
+        console_combo.bind("<<ComboboxSelected>>", on_console_change)
+        part_combo.bind("<<ComboboxSelected>>", load_list)
+        search_entry.bind("<KeyRelease>", update_view)
+
+        def download_selected():
+            selected = tree.selection()
+            if not selected: return
+            dest = dest_entry.get().strip()
+            if not dest: return
+            Path(dest).mkdir(parents=True, exist_ok=True)
+            
+            games = []
+            for item in selected:
+                values = tree.item(item, "values")
+                identifier = tree.item(item, "tags")[0]
+                games.append({"name": values[0], "identifier": identifier})
+            
+            download_btn.config(state="disabled")
+            threading.Thread(target=self.run_ia_downloads, args=(games, dest, status_var, progress_bar, lambda: download_btn.config(state="normal")), daemon=True).start()
+
+        # Action Buttons
+        btn_frame = Frame(dialog, padx=10, pady=10, bg=COLORS['bg_dark'])
+        btn_frame.pack(fill="x")
+        
+        load_btn = Button(btn_frame, text="🔄 REFRESH", command=load_list,
+                        font=self.font_button, bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                        relief="flat", cursor="hand2", padx=15, pady=5)
+        load_btn.pack(side="left", padx=5)
+
+        download_btn = Button(btn_frame, text="📥 DOWNLOAD SELECTED", command=download_selected,
+                            font=self.font_button, bg=COLORS['button_green'], fg=COLORS['bg_dark'],
+                            activebackground=COLORS['text_primary'],
+                            relief="flat", cursor="hand2", padx=20, pady=5)
+        download_btn.pack(side="left", padx=5)
+
+        Button(btn_frame, text="✕ CLOSE", command=dialog.destroy,
+               font=self.font_button, bg=COLORS['accent_red'], fg="white",
+               relief="flat", cursor="hand2", padx=15, pady=5).pack(side="right", padx=5)
+
+        # Init
+        on_system_change()
+
+    def run_ia_downloads(self, games, dest_dir, status_label, progress_bar, on_complete):
+        """Handle IA downloads in sequence"""
+        total = len(games)
+        for i, game in enumerate(games, 1):
+            name = game['name']
+            identifier = game['identifier']
+            encoded_name = urllib.parse.quote(name)
+            url = f"https://archive.org/download/{identifier}/{encoded_name}"
+            dest_path = Path(dest_dir) / name
+            
+            def update_status(msg):
+                status_label.config(text=f"[{i}/{total}] {msg}")
+                self.master.update_idletasks()
+
+            update_status(f"Starting: {name}")
+            
+            try:
+                if self.ia_session:
+                    with self.ia_session.get(url, stream=True, timeout=300) as response:
+                        response.raise_for_status()
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(dest_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=1024*1024):
+                                if chunk:
+                                    f.write(chunk)
+                                    downloaded += len(chunk)
+                                    if total_size > 0:
+                                        percent = (downloaded / total_size) * 100
+                                        progress_bar['value'] = percent
+                                        update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                                    else:
+                                        update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB...")
+                elif self.ia_s3_keys:
+                    access, secret = self.ia_s3_keys
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Authorization': f'LOW {access}:{secret}'})
+                    with urllib.request.urlopen(req, timeout=300) as response:
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(dest_path, 'wb') as f:
+                            while True:
+                                chunk = response.read(1024*1024)
+                                if not chunk: break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    percent = (downloaded / total_size) * 100
+                                    progress_bar['value'] = percent
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                                else:
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB...")
+                else:
+                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    with urllib.request.urlopen(req, timeout=300) as response:
+                        total_size = int(response.headers.get('content-length', 0))
+                        downloaded = 0
+                        with open(dest_path, 'wb') as f:
+                            while True:
+                                chunk = response.read(1024*1024)
+                                if not chunk: break
+                                f.write(chunk)
+                                downloaded += len(chunk)
+                                if total_size > 0:
+                                    percent = (downloaded / total_size) * 100
+                                    progress_bar['value'] = percent
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB / {total_size/(1024*1024):.1f}MB ({percent:.1f}%)")
+                                else:
+                                    update_status(f"Downloading: {downloaded/(1024*1024):.1f}MB...")
+                
+                update_status(f"✅ Finished: {name}")
+                time.sleep(0.5)
+            except Exception as e:
+                update_status(f"❌ Error: {e}")
+                if messagebox.askretrycancel("Download Error", f"Failed to download {name}:\n{e}\n\nRetry?"):
+                    self.run_ia_downloads(games[i-1:], dest_dir, status_label, progress_bar, on_complete)
+                    return
+        
+        status_label.config(text=f"🎉 Completed {total} download(s)!")
+        progress_bar['value'] = 0
+        messagebox.showinfo("Success", f"Successfully downloaded {total} game(s)")
+        on_complete()
+
     def save_config(self):
         """Save configuration to JSON file"""
         try:
@@ -2684,6 +3982,8 @@ obtained ROM files.
                 'process_ps2_cues': self.process_ps2_cues.get(),
                 'process_ps2_isos': self.process_ps2_isos.get(),
                 'process_psp_isos': self.process_psp_isos.get(),
+                'process_ps3_isos': self.process_ps3_isos.get(),
+                'process_xbox_isos': self.process_xbox_isos.get(),
                 'process_nes_roms': self.process_nes_roms.get(),
                 'process_snes_roms': self.process_snes_roms.get(),
                 'process_n64_roms': self.process_n64_roms.get(),
@@ -2693,6 +3993,9 @@ obtained ROM files.
                 'seven_zip_path': self._make_portable_path(self.seven_zip_path),
                 'maxcso_path': self._make_portable_path(self.maxcso_path),
                 'ndecrypt_path': self._make_portable_path(self.ndecrypt_path),
+                'ps3_dumper_path': self._make_portable_path(self.ps3_dumper_path),
+                'auto_decrypt_ps3_path': self._make_portable_path(self.auto_decrypt_ps3_path),
+                'ps1_output_format': self.ps1_output_format,
                 'ps2_output_format': self.ps2_output_format,
                 'psp_output_format': self.psp_output_format,
                 'ps2_emulator': self.ps2_emulator,
@@ -2730,6 +4033,8 @@ obtained ROM files.
                 self.process_ps2_cues.set(config.get('process_ps2_cues', False))
                 self.process_ps2_isos.set(config.get('process_ps2_isos', False))
                 self.process_psp_isos.set(config.get('process_psp_isos', False))
+                self.process_ps3_isos.set(config.get('process_ps3_isos', False))
+                self.process_xbox_isos.set(config.get('process_xbox_isos', False))
                 self.process_nes_roms.set(config.get('process_nes_roms', False))
                 self.process_snes_roms.set(config.get('process_snes_roms', False))
                 self.process_n64_roms.set(config.get('process_n64_roms', False))
@@ -2761,6 +4066,16 @@ obtained ROM files.
                 saved_ndecrypt = self._resolve_portable_path(config.get('ndecrypt_path'))
                 if saved_ndecrypt and os.path.exists(saved_ndecrypt):
                     self.ndecrypt_path = saved_ndecrypt
+
+                # Restore ps3-disc-dumper path if saved and still exists
+                saved_ps3_dumper = self._resolve_portable_path(config.get('ps3_dumper_path'))
+                if saved_ps3_dumper and os.path.exists(saved_ps3_dumper):
+                    self.ps3_dumper_path = saved_ps3_dumper
+
+                # Restore AutoDecryptPS3 path if saved and still exists
+                saved_auto_decrypt = self._resolve_portable_path(config.get('auto_decrypt_ps3_path'))
+                if saved_auto_decrypt and os.path.exists(saved_auto_decrypt):
+                    self.auto_decrypt_ps3_path = saved_auto_decrypt
                 
                 # Restore system extraction directories
                 saved_system_dirs = config.get('system_extract_dirs', {})
@@ -2819,16 +4134,7 @@ obtained ROM files.
             pass
     
     def detect_iso_system(self, name, size_bytes=None, full_path=None):
-        """Determine whether an ISO is PS2 or PSP using IDs, folder path, and size.
-        
-        Args:
-            name: Filename of the ISO
-            size_bytes: Optional file size in bytes
-            full_path: Optional full path for folder-based detection
-        
-        Returns:
-            'PSP', 'PlayStation 2', or None if uncertain
-        """
+        """Determine whether an ISO is PS2, PSP, PS3, or Xbox using IDs, folder path, and size."""
         lower_name = str(name).lower()
         
         # Check for game ID patterns in filename (very reliable)
@@ -2836,7 +4142,13 @@ obtained ROM files.
             return 'PSP'
         if any(token in lower_name for token in PS2_ID_PATTERNS):
             return 'PlayStation 2'
+        if any(token in lower_name for token in PS3_ID_PATTERNS):
+            return 'PlayStation 3'
         
+        # Check for Xbox specific extensions/naming
+        if lower_name.endswith('.xiso'):
+            return 'Xbox'
+            
         # Check folder path for system hints (use full path if available)
         path_to_check = str(full_path).lower() if full_path else lower_name
         path_parts = re.split(r'[\\/]', path_to_check)
@@ -2847,22 +4159,40 @@ obtained ROM files.
             # PSP folder detection
             if part_clean == 'psp' or 'playstation portable' in part_clean:
                 return 'PSP'
-            # PS2 folder detection - be more specific to avoid false matches
+            # PS2 folder detection
             if part_clean == 'ps2' or part_clean == 'playstation 2' or part_clean == 'playstation2' or 'sony playstation 2' in part_clean:
                 return 'PlayStation 2'
+            # PS3 folder detection
+            if part_clean == 'ps3' or part_clean == 'playstation 3' or part_clean == 'playstation3' or 'sony playstation 3' in part_clean:
+                return 'PlayStation 3'
+            # Xbox folder detection
+            if part_clean == 'xbox' or 'microsoft xbox' in part_clean:
+                if '360' in part_clean: return 'Xbox 360'
+                return 'Xbox'
+            if 'xbox 360' in part_clean or 'xbox360' in part_clean:
+                return 'Xbox 360'
         
-        # Size-based heuristic as last resort (less reliable)
-        # Only use if size is significantly indicative
+        # Size-based heuristic as last resort
         if size_bytes is not None:
             size_gb = size_bytes / (1024 * 1024 * 1024)
             # PS2 DVDs are typically 4.7GB or larger, PSP UMDs max at ~1.8GB
-            if size_gb >= 3.0:
+            if 3.0 <= size_gb <= 4.7:
+                # Could be PS2 or Xbox, but PS2 is more common
                 return 'PlayStation 2'
-            # Very small ISOs (under 500MB) are more likely PSP
-            if size_gb <= 0.5:
-                return 'PSP'
+            # PS3 games are usually much larger, often 8GB to 45GB
+            if size_gb > 5.0 and size_gb <= 50.0:
+                return 'PlayStation 3'
+            # Xbox 360 ISOs are usually 7.3GB (XGD2) or 8.1GB (XGD3)
+            if 7.0 <= size_gb <= 8.5:
+                return 'Xbox 360'
         
-        # If we can't determine, return None - let user settings decide
+        # Check name patterns
+        if 'xbox' in lower_name:
+            if '360' in lower_name: return 'Xbox 360'
+            return 'Xbox'
+        if 'ps3' in lower_name:
+            return 'PlayStation 3'
+            
         return None
 
     def _make_portable_path(self, path_value):
@@ -3137,6 +4467,35 @@ obtained ROM files.
                font=self.font_small, bg=COLORS['accent_purple'],
                fg="white", relief="flat", cursor="hand2").pack(side="left", padx=2)
         
+        # PS3 Disc Dumper location
+        ps3_dumper_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
+        ps3_dumper_frame.pack(fill="x", pady=(0, 12))
+        
+        Label(ps3_dumper_frame, text="🎮 PS3 Dumper:", font=self.font_label_bold,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
+        self.ps3_dumper_label = Label(ps3_dumper_frame, 
+                                     text=self.ps3_dumper_path or "Not set (required for PS3 ISOs)",
+                                     font=self.font_small,
+                                     fg=COLORS['text_secondary'] if self.ps3_dumper_path else COLORS['text_muted'],
+                                     bg=COLORS['bg_dark'], anchor="w")
+        self.ps3_dumper_label.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        
+        def browse_ps3_dumper():
+            filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
+            selected = filedialog.askopenfilename(title="Select ps3-disc-dumper executable", filetypes=filetypes)
+            if selected:
+                self.ps3_dumper_path = selected
+                self.ps3_dumper_label.config(text=self.ps3_dumper_path, fg=COLORS['text_secondary'])
+                self.save_config()
+
+        Button(ps3_dumper_frame, text="[ SET ]", command=browse_ps3_dumper,
+               font=self.font_small, bg=COLORS['bg_light'],
+               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left", padx=2)
+        
+        Button(ps3_dumper_frame, text="[ DOWNLOAD ]", command=self.download_ps3_dumper,
+               font=self.font_small, bg=COLORS['accent_purple'],
+               fg="white", relief="flat", cursor="hand2").pack(side="left", padx=2)
+        
         # Options panel
         options_frame = Frame(self.main_frame, bg=COLORS['bg_light'], padx=10, pady=8)
         options_frame.pack(fill="x", pady=(0, 12))
@@ -3180,8 +4539,18 @@ obtained ROM files.
             fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
             activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
 
+        Checkbutton(options_frame, text="💚 Process Xbox ISO files (.iso/.xiso → EXTRACT)",
+                variable=self.process_xbox_isos, font=cb_font,
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
         Checkbutton(options_frame, text="🎮 Process PSP ISO files (.iso → CSO/ZSO)",
                 variable=self.process_psp_isos, font=cb_font,
+            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
+            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
+        Checkbutton(options_frame, text="🎮 Process PS3 ISO files (.iso → DECRYPT)",
+                variable=self.process_ps3_isos, font=cb_font,
             fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
             activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
 
@@ -3199,6 +4568,24 @@ obtained ROM files.
                 variable=self.process_n64_roms, font=cb_font,
             fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
             activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+
+        # PS1 output format selector
+        ps1_format_frame = Frame(options_frame, bg=cb_bg)
+        ps1_format_frame.pack(fill="x", pady=(4, 2))
+        Label(ps1_format_frame, text="↳ PS1 output format:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
+        self.ps1_format_combo = ttk.Combobox(ps1_format_frame, values=PS1_OUTPUT_FORMATS,
+                            state="readonly", width=6)
+        if not hasattr(self, 'ps1_output_format') or self.ps1_output_format not in PS1_OUTPUT_FORMATS:
+            self.ps1_output_format = 'CHD'
+        self.ps1_format_combo.set(self.ps1_output_format)
+        self.ps1_format_combo.pack(side="left", padx=8)
+
+        def on_ps1_format_change(event=None):
+            self.ps1_output_format = self.ps1_format_combo.get()
+            self.save_config()
+
+        self.ps1_format_combo.bind("<<ComboboxSelected>>", on_ps1_format_change)
 
         # Emulator preset selection
         emulator_frame = Frame(options_frame, bg=cb_bg)
@@ -3371,6 +4758,14 @@ obtained ROM files.
                                         activebackground=COLORS['accent_pink'],
                                         relief="flat", cursor="hand2", padx=12, pady=4)
         self.decrypt_3ds_button.pack(side="left", padx=(0, 8))
+
+        self.ia_browser_button = Button(button_frame_2, text="🌐 ROM BROWSER", 
+                                        command=self.ia_browser_dialog,
+                                        font=self.font_button,
+                                        bg=COLORS['button_blue'], fg="white",
+                                        activebackground=COLORS['accent_purple'],
+                                        relief="flat", cursor="hand2", padx=12, pady=4)
+        self.ia_browser_button.pack(side="left", padx=(0, 8))
 
         self.bios_download_button = Button(button_frame_2, text="🧬 BIOS", 
                                           command=self.download_bios_dialog,
@@ -3643,12 +5038,24 @@ obtained ROM files.
         if recursive:
             if self.process_ps1_cues.get():
                 files.update(path.rglob("*.cue"))
+                if self.ps1_output_format == 'ISO':
+                    files.update(path.rglob("*.chd"))
             if self.process_ps2_cues.get():
                 files.update(path.rglob("*.cue"))
+                if self.ps2_output_format == 'ISO':
+                    files.update(path.rglob("*.chd"))
             if self.process_ps2_isos.get():
                 files.update(path.rglob("*.iso"))
+                if self.ps2_output_format == 'CHD':
+                    # Already handled by .iso glob, but if we wanted CHD->ISO we'd need more
+                    pass
             if self.process_psp_isos.get():
                 files.update(path.rglob("*.iso"))
+            if self.process_ps3_isos.get():
+                files.update(path.rglob("*.iso"))
+            if self.process_xbox_isos.get():
+                files.update(path.rglob("*.iso"))
+                files.update(path.rglob("*.xiso"))
             if self.process_nes_roms.get():
                 files.update(path.rglob("*.nes"))
             if self.process_snes_roms.get():
@@ -3668,6 +5075,11 @@ obtained ROM files.
                 files.update(path.glob("*.iso"))
             if self.process_psp_isos.get():
                 files.update(path.glob("*.iso"))
+            if self.process_ps3_isos.get():
+                files.update(path.glob("*.iso"))
+            if self.process_xbox_isos.get():
+                files.update(path.glob("*.iso"))
+                files.update(path.glob("*.xiso"))
             if self.process_nes_roms.get():
                 files.update(path.glob("*.nes"))
             if self.process_snes_roms.get():
@@ -4415,46 +5827,120 @@ obtained ROM files.
     def convert_game(self, path):
         """Convert a game file to the selected output format"""
         ext = path.suffix.lower()
+        path = Path(path)
 
         if ext == '.cue':
-            output_path = path.with_suffix('.chd')
-            if output_path.exists():
-                self.log(f"  ⚠️  CHD already exists, skipping: {output_path.name}")
+            # Check system-specific output format
+            is_ps1 = self.process_ps1_cues.get()
+            is_ps2 = self.process_ps2_cues.get()
+            
+            # Use PS1 setting as default if both are enabled or neither (generic CUE)
+            fmt = self.ps1_output_format.upper() if is_ps1 else self.ps2_output_format.upper()
+            
+            if fmt == 'CHD':
+                output_path = path.with_suffix('.chd')
+                if output_path.exists():
+                    self.log(f"  ⚠️  CHD already exists, skipping: {output_path.name}")
+                    return True
+                cmd = [self.chdman_path, 'createcd', '-np', str(self.chdman_max_processors), '-i', str(path), '-o', str(output_path)]
+                original_size = sum(f.stat().st_size for f in self.parse_cue_file(path)) + path.stat().st_size
+                label = 'CD (CUE)'
+                format_label = 'CHD'
+            else:
+                # ISO/BIN output - CUE/BIN is already the "uncompressed" format for CDs
+                self.log(f"  ℹ️  ISO/BIN selected for {path.name} - keeping as-is.")
                 return True
-            # Use --numprocessors to limit chdman RAM usage (each processor uses ~500MB-1GB)
-            cmd = [self.chdman_path, 'createcd', '-np', str(self.chdman_max_processors), '-i', str(path), '-o', str(output_path)]
-            original_size = sum(f.stat().st_size for f in self.parse_cue_file(path)) + path.stat().st_size
-            # Label cues generically since PS1/PS2 CD games both use createcd
-            label = 'CD (CUE)'
-            format_label = 'CHD'
+        elif ext == '.chd':
+            # Handle CHD to ISO/BIN extraction (reverse conversion)
+            is_ps1 = self.process_ps1_cues.get()
+            is_ps2 = self.process_ps2_cues.get()
+            
+            # Determine target format
+            fmt = self.ps1_output_format.upper() if is_ps1 else self.ps2_output_format.upper()
+            
+            if fmt != 'ISO':
+                # Only process CHDs if output is set to ISO (extraction mode)
+                return True
+            
+            # Detect if this is a CD or DVD CHD
+            try:
+                info_cmd = [self.chdman_path, 'info', '-i', str(path)]
+                info_res = subprocess.run(info_cmd, capture_output=True, text=True, timeout=10)
+                is_cd = "CDROM" in info_res.stdout or "createcd" in info_res.stdout
+            except:
+                is_cd = True # Default to CD if check fails
+            
+            if is_cd:
+                # Extract to BIN/CUE
+                output_path = path.with_suffix('.cue')
+                if output_path.exists():
+                    self.log(f"  ⚠️  CUE already exists, skipping extraction: {output_path.name}")
+                    return True
+                cmd = [self.chdman_path, 'extractcd', '-i', str(path), '-o', str(output_path)]
+                label = 'CHD (CD)'
+                format_label = 'BIN/CUE'
+            else:
+                # Extract to ISO
+                output_path = path.with_suffix('.iso')
+                if output_path.exists():
+                    self.log(f"  ⚠️  ISO already exists, skipping extraction: {output_path.name}")
+                    return True
+                cmd = [self.chdman_path, 'extractdvd', '-i', str(path), '-o', str(output_path)]
+                label = 'CHD (DVD)'
+                format_label = 'ISO'
+            
+            original_size = path.stat().st_size
         elif ext == '.iso':
-            # Determine if this is a PSP or PS2 ISO based on detection and settings
+            # Determine if this is a PSP, PS2, PS3, or Xbox ISO based on detection and settings
             iso_size = path.stat().st_size
             system_guess = self.detect_iso_system(path.name, iso_size, full_path=path)
             
-            # Respect user settings - if only one system is enabled, use that
+            # Respect user settings
             psp_enabled = self.process_psp_isos.get()
             ps2_enabled = self.process_ps2_isos.get()
+            ps3_enabled = self.process_ps3_isos.get()
+            xbox_enabled = self.process_xbox_isos.get()
             
-            # Determine which system to treat this as
+            # PS3 Decryption
+            if ps3_enabled and system_guess == 'PlayStation 3':
+                if not self.ps3_dumper_path:
+                    self.log(f"  ⚠️  PS3 Dumper not configured. Cannot process: {path.name}")
+                    return False
+                
+                self.log(f"  🎮 PS3 Decrypt: Launching dumper for {path.name}...")
+                try:
+                    # Launch ps3-disc-dumper with the ISO path as argument
+                    # It's a GUI tool, so it will pop up a window.
+                    # We use Popen and don't wait if it's meant to be interactive, 
+                    # but the user said "support for PS3 ISOs", and usually this implies
+                    # being able to trigger the process.
+                    cmd = [self.ps3_dumper_path, str(path)]
+                    subprocess.Popen(cmd)
+                    self.log(f"  ✅ PS3 Dumper launched. Please complete decryption in the dumper window.")
+                    return True # Treat as success in terms of launching
+                except Exception as e:
+                    self.log(f"  ❌ Failed to launch PS3 Dumper: {e}")
+                    return False
+
+            # Determine system path
+            if xbox_enabled and (system_guess == 'Xbox' or system_guess == 'Xbox 360'):
+                # Xbox extraction
+                return self.extract_xbox_iso(path, path.parent)
+            
+            # Determine which system to treat this as (PS2/PSP)
             if psp_enabled and not ps2_enabled:
-                # Only PSP enabled - treat all ISOs as PSP
                 treat_psp = True
             elif ps2_enabled and not psp_enabled:
-                # Only PS2 enabled - treat all ISOs as PS2
                 treat_psp = False
             elif psp_enabled and ps2_enabled:
-                # Both enabled - use detection result
                 if system_guess == 'PSP':
                     treat_psp = True
-                elif system_guess == 'PlayStation 2':
-                    treat_psp = False
                 else:
-                    # Uncertain - log warning and default to PS2 (more common for large ISOs)
-                    self.log(f"  ⚠️  Could not determine system for {path.name}, defaulting to PS2")
                     treat_psp = False
             else:
-                # Neither enabled - shouldn't happen but handle gracefully
+                # Fallback to Xbox if specifically selected or detected and others not available
+                if xbox_enabled:
+                    return self.extract_xbox_iso(path, path.parent)
                 self.log(f"  ❌ No ISO processing enabled for: {path.name}")
                 return False
             
