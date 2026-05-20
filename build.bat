@@ -90,6 +90,19 @@ if errorlevel 1 (
     echo requests available
 )
 
+REM Install python-docx if not present
+echo Checking for python-docx...
+python -m pip list | findstr python-docx >nul 2>&1
+if errorlevel 1 (
+    echo Installing python-docx...
+    python -m pip install python-docx -q
+    if errorlevel 1 (
+        echo Warning: Failed to install python-docx - .docx key detection will be disabled
+    )
+) else (
+    echo python-docx available
+)
+
 REM Clean previous builds
 echo Cleaning previous builds...
 if exist dist rmdir /s /q dist >nul 2>&1
@@ -106,6 +119,7 @@ python -m PyInstaller ^
     --distpath=dist ^
     --hidden-import=psutil ^
     --hidden-import=requests ^
+    --hidden-import=docx ^
     --runtime-hook=%RUNTIME_HOOK% ^
     rom_converter.py
 
