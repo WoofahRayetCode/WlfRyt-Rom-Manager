@@ -17,7 +17,7 @@ from tkinter import simpledialog
 import xml.etree.ElementTree as ET
 import gzip
 from pathlib import Path
-from tkinter import Tk, Frame, Label, Button, Entry, Text, Scrollbar, Checkbutton, BooleanVar, filedialog, messagebox, Toplevel
+from tkinter import Tk, Frame, Label, Button, Entry, Text, Scrollbar, Checkbutton, BooleanVar, Radiobutton, StringVar, filedialog, messagebox, Toplevel
 from tkinter import ttk
 import tkinter.font as tkfont
 import threading
@@ -206,15 +206,91 @@ THEME_PRESETS = {
 COLORS = dict(THEME_PRESETS['PS2'])
 
 
+class CollapsibleFrame(Frame):
+    """A frame with a clickable header that expands/collapses its content."""
+    def __init__(self, parent, title="", font=None, fg="white", bg=None, collapsed=False, **kwargs):
+        bg = bg or COLORS.get('bg_medium', '#1a1a2e')
+        super().__init__(parent, bg=bg, bd=0, highlightthickness=0, **kwargs)
+        self._collapsed = collapsed
+        self._header_bg = bg
+        self._title = title
+        self._header_font = font
+        self._header_fg = fg
+
+        self._header_frame = Frame(self, bg=bg, cursor="hand2")
+        self._header_frame.pack(fill="x")
+
+        self._indicator = Label(self._header_frame, text="▼" if not collapsed else "▶",
+                                font=font, fg=fg, bg=bg, width=2)
+        self._indicator.pack(side="left", padx=(4, 0))
+
+        self._title_label = Label(self._header_frame, text=title, font=font, fg=fg, bg=bg, anchor="w")
+        self._title_label.pack(side="left", fill="x", expand=True)
+
+        self._content_frame = Frame(self, bg=bg)
+        if not collapsed:
+            self._content_frame.pack(fill="x", padx=8, pady=(0, 4))
+
+        self._header_frame.bind("<Button-1>", self._toggle)
+        self._indicator.bind("<Button-1>", self._toggle)
+        self._title_label.bind("<Button-1>", self._toggle)
+
+    @property
+    def content(self):
+        return self._content_frame
+
+    @property
+    def collapsed(self):
+        return self._collapsed
+
+    def _toggle(self, event=None):
+        if self._collapsed:
+            self._content_frame.pack(fill="x", padx=8, pady=(0, 4))
+            self._indicator.config(text="▼")
+        else:
+            self._content_frame.pack_forget()
+            self._indicator.config(text="▶")
+        self._collapsed = not self._collapsed
+
+    def expand(self):
+        if self._collapsed:
+            self._toggle()
+
+    def collapse(self):
+        if not self._collapsed:
+            self._toggle()
+
+    def set_colors(self, header_bg, title_fg):
+        self._header_bg = header_bg
+        self._header_frame.configure(bg=header_bg)
+        self._indicator.configure(bg=header_bg, fg=title_fg)
+        self._title_label.configure(bg=header_bg, fg=title_fg)
+        self._content_frame.configure(bg=header_bg)
+        self.configure(bg=header_bg)
+
+
 class ROMConverter:
     def __init__(self, master):
         self.master = master
         master.title("⚡ ROM CONVERTER ⚡")
-        master.geometry("1000x850")
-        master.minsize(900, 700)
+        # Load persistent window size from config, fallback to 1100x800
+        win_w, win_h = self._load_window_size()
+        master.geometry(f"{win_w}x{win_h}")
+        master.minsize(950, 650)
         master.resizable(True, True)
         master.configure(bg=COLORS['bg_dark'])
-        
+        master.bind("<Configure>", self._on_window_resize)
+
+        # Drag-and-drop ROM directory (requires tkinterdnd2; silently skip if unavailable)
+        try:
+            master.drop_target_register("DND_Files")
+            master.dnd_bind("<<Drop>>", self._on_drop)
+        except Exception:
+            pass
+
+        # Log panel visibility tracking
+        self.log_visible = False
+
         # Maximize window on startup (cross-platform)
         try:
             master.state('zoomed')  # Windows
@@ -426,17 +502,21 @@ class ROMConverter:
             return "Unknown"
     
     def auto_pull_dependencies(self):
-        """Automatically download essential project files if missing from app directory"""
-        # Files to check: (filename, remote_url)
-        # Note: raw.githubusercontent.com is used for direct downloads
+        """Automatically download essential project files if missing from app directory.
+        Platform-aware: downloads .exe on Windows, native binaries on Linux."""
         base_url = "https://raw.githubusercontent.com/WoofahRayetCode/WlfRyt-Rom-Manager/main"
-        
+
         # 3DS Keys filename has spaces - URL encode them as %20
         deps = [
             ("3DS AES Keys.txt", f"{base_url}/3DS%20AES%20Keys.txt"),
-            ("maxcso.exe", f"{base_url}/maxcso.exe"),
-            ("extract-xiso.exe", f"{base_url}/extract-xiso.exe")
         ]
+
+        if sys.platform == "win32":
+            deps.append(("maxcso.exe", f"{base_url}/maxcso.exe"))
+            deps.append(("extract-xiso.exe", f"{base_url}/extract-xiso.exe"))
+        else:
+            deps.append(("maxcso", f"{base_url}/maxcso"))
+            deps.append(("extract-xiso", f"{base_url}/extract-xiso"))
         
         missing = []
         for filename, url in deps:
@@ -463,6 +543,13 @@ class ROMConverter:
                             with open(local_path, "wb") as f:
                                 shutil.copyfileobj(response, f)
                     
+                    # Make binaries executable on Linux
+                    if sys.platform != "win32" and filename in ("maxcso", "extract-xiso"):
+                        try:
+                            os.chmod(str(local_path), 0o755)
+                        except Exception:
+                            pass
+
                     # Log success if UI is ready, otherwise just console
                     msg = f"✅ Auto-pulled missing dependency: {filename}"
                     print(msg)
@@ -1374,50 +1461,82 @@ class ROMConverter:
         return False
 
     def check_extract_xiso(self):
-        """Find extract-xiso executable or prompt to download"""
-        # Look in app directory first (portable)
-        app_xiso = self.script_dir / "extract-xiso.exe"
+        """Find extract-xiso executable. Platform-aware: checks .exe on Windows, binary on Linux."""
+        xiso_name = "extract-xiso.exe" if sys.platform == "win32" else "extract-xiso"
+
+        # Check bundled resources (PyInstaller)
+        bundled_xiso = self.bundle_dir / xiso_name
+        if bundled_xiso.exists():
+            self.extract_xiso_path = str(bundled_xiso)
+            return True
+
+        # Check script directory
+        app_xiso = self.script_dir / xiso_name
         if app_xiso.exists():
             self.extract_xiso_path = str(app_xiso)
             return True
-            
-        # Check system PATH
+
+        # Check PATH
         sys_xiso = shutil.which("extract-xiso")
         if sys_xiso:
             self.extract_xiso_path = sys_xiso
             return True
-            
+
+        # Linux: check common locations
+        if sys.platform != "win32":
+            for candidate in ["/usr/bin/extract-xiso", "/usr/local/bin/extract-xiso"]:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    self.extract_xiso_path = candidate
+                    return True
+
         return False
 
     def extract_xbox_iso(self, iso_path, dest_folder):
-        """Extract Xbox/Xbox 360 ISO using extract-xiso"""
+        """Extract Xbox/Xbox 360 ISO using extract-xiso. Supports XGD2/XGD3 (Xbox 360) images."""
         if not self.extract_xiso_path:
-            self.log("⚠️  extract-xiso not found. Skipping Xbox extraction.")
+            self.log("⚠️  extract-xiso not found. Use Settings → Tool Paths to download or set path.")
             return False
-            
+
         iso_path = Path(iso_path)
-        # Create a subfolder for the game files
         game_name = iso_path.stem
         target_dir = Path(dest_folder) / game_name
         target_dir.mkdir(parents=True, exist_ok=True)
-        
+
         try:
+            # Detect ISO size for logging
+            iso_size_gb = iso_path.stat().st_size / (1024 ** 3) if iso_path.exists() else 0
+            iso_type = "Xbox"
+            if iso_size_gb > 7.0:
+                iso_type = "Xbox 360 (XGD3)" if iso_size_gb > 8.0 else "Xbox 360 (XGD2)"
+
+            self.log(f"🎮 Extracting {iso_type} ISO: {iso_path.name} ({iso_size_gb:.1f} GB)")
+
             # extract-xiso -x -d [directory] [iso]
+            # -x = extract, -d = destination directory
             cmd = [self.extract_xiso_path, "-x", "-d", str(target_dir), str(iso_path)]
-            
-            # Use idle priority
-            creationflags = 0
-            if sys.platform == "win32":
-                creationflags = 0x00000040 # IDLE_PRIORITY_CLASS
-                
-            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
-            
-            if result.returncode == 0:
-                self.log(f"✅ Extracted Xbox ISO: {iso_path.name}")
-                return True
+
+            creationflags = 0x00000040 if sys.platform == "win32" else 0  # IDLE_PRIORITY_CLASS
+
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                   creationflags=creationflags, timeout=600)
+            # Check output for success indicators
+            output = (result.stdout + result.stderr).lower()
+            if result.returncode == 0 or "extraction complete" in output or "done" in output:
+                # Verify files were actually extracted
+                extracted_files = list(target_dir.glob("*"))
+                if extracted_files:
+                    self.log(f"✅ Extracted {iso_type} ISO: {iso_path.name} → {len(extracted_files)} files in {target_dir.name}/")
+                    return True
+                else:
+                    self.log(f"⚠️  Extraction appeared to succeed but no files found for {iso_path.name}")
+                    return False
             else:
-                self.log(f"❌ Failed to extract {iso_path.name}: {result.stderr}")
+                err_msg = result.stderr.strip() or result.stdout.strip()
+                self.log(f"❌ Failed to extract {iso_path.name}: {err_msg[:200]}")
                 return False
+        except subprocess.TimeoutExpired:
+            self.log(f"❌ Timed out extracting {iso_path.name} (over 10 minutes)")
+            return False
         except Exception as e:
             self.log(f"❌ Error extracting Xbox ISO {iso_path.name}: {e}")
             return False
@@ -1443,6 +1562,7 @@ class ROMConverter:
                     self.log(f"7-Zip location set to: {seven_zip_file}")
                     if hasattr(self, 'seven_zip_label'):
                         self.seven_zip_label.config(text=self.seven_zip_path or "Not set")
+                    self._update_tool_status()
                     messagebox.showinfo("Success", f"7-Zip location set to:\n{seven_zip_file}")
                 else:
                     messagebox.showerror("Error", "Selected file does not appear to be 7-Zip")
@@ -1471,68 +1591,333 @@ class ROMConverter:
                     self.log(f"maxcso location set to: {maxcso_file}")
                     if hasattr(self, 'maxcso_label'):
                         self.maxcso_label.config(text=self.maxcso_path)
+                    self._update_tool_status()
                     messagebox.showinfo("Success", f"maxcso location set to:\n{maxcso_file}")
                 else:
                     messagebox.showerror("Error", "Selected file does not appear to be maxcso")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to verify maxcso:\n{e}")
     
+    def download_maxcso(self):
+        """Download the latest maxcso binary from GitHub releases with progress dialog."""
+        progress_window = Toplevel(self.master)
+        progress_window.title("Downloading maxcso")
+        progress_window.geometry("450x180")
+        progress_window.resizable(False, False)
+        progress_window.transient(self.master)
+        progress_window.grab_set()
+        progress_window.configure(bg=COLORS["bg_dark"])
+        progress_window.lift()
+        progress_window.focus_force()
+
+        Label(progress_window, text="Downloading maxcso...", font=self.font_title,
+              fg=COLORS["text_primary"], bg=COLORS["bg_dark"]).pack(pady=10)
+        progress_bar = ttk.Progressbar(progress_window, mode='indeterminate', length=380)
+        progress_bar.pack(pady=8)
+        progress_bar.start(10)
+        status_label = Label(progress_window, text="Fetching latest release...",
+                            font=self.font_small, fg=COLORS["text_secondary"],
+                            bg=COLORS["bg_dark"], wraplength=420)
+        status_label.pack(pady=5)
+        progress_window.update()
+
+        def do_download():
+            try:
+                # Fetch latest release info from GitHub API
+                api_url = "https://api.github.com/repos/unknownbrackets/maxcso/releases/latest"
+                req = urllib.request.Request(api_url, headers={
+                    'User-Agent': 'ROM-Converter',
+                    'Accept': 'application/vnd.github.v3+json'
+                })
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    release_data = json.loads(resp.read().decode())
+
+                # Find the correct asset for this platform
+                asset = None
+                if sys.platform == "win32":
+                    for a in release_data.get("assets", []):
+                        name = a["name"].lower()
+                        if name.endswith(".exe") and ("windows" in name or "win" in name or "x86" in name):
+                            asset = a
+                            break
+                    if not asset:
+                        for a in release_data.get("assets", []):
+                            if a["name"].lower().endswith(".exe"):
+                                asset = a
+                                break
+                else:
+                    for a in release_data.get("assets", []):
+                        name = a["name"].lower()
+                        if "linux" in name and not name.endswith(".exe"):
+                            asset = a
+                            break
+                    if not asset:
+                        for a in release_data.get("assets", []):
+                            if not a["name"].lower().endswith(".exe") and "source" not in a["name"].lower():
+                                asset = a
+                                break
+
+                if not asset:
+                    status_label.config(text="No prebuilt binary found. Downloading source fallback...")
+                    progress_window.update()
+                    # Fallback: download from project repo (bundled binary)
+                    fallback_url = "https://raw.githubusercontent.com/WoofahRayetCode/WlfRyt-Rom-Manager/main/maxcso.exe"
+                    self._download_file(fallback_url, self.script_dir / "maxcso.exe", status_label, progress_window)
+                else:
+                    download_url = asset["browser_download_url"]
+                    fname = asset["name"] if sys.platform == "win32" else "maxcso"
+                    dest = self.script_dir / fname
+                    status_label.config(text=f"Downloading {asset['name']} ({asset['size']/1024/1024:.1f} MB)...")
+                    progress_window.update()
+                    self._download_file(download_url, dest, status_label, progress_window)
+
+                    # Make executable on Linux
+                    if sys.platform != "win32":
+                        os.chmod(str(dest), 0o755)
+
+                # Re-check to pick up the newly downloaded binary
+                self.check_maxcso()
+                if self.maxcso_path:
+                    self.save_config()
+                    if hasattr(self, 'maxcso_label'):
+                        self.maxcso_label.config(text=self.maxcso_path, fg=COLORS["text_secondary"])
+                    self._update_tool_status()
+                    self.log(f"✅ maxcso downloaded successfully: {self.maxcso_path}")
+                    progress_window.after(500, progress_window.destroy)
+                    self.master.after(600, lambda: messagebox.showinfo(
+                        "Success", f"maxcso downloaded to:\n{self.maxcso_path}", parent=self.master))
+                else:
+                    self.log("⚠️  maxcso downloaded but not detected. Check Settings → Tool Paths.")
+                    progress_window.after(500, progress_window.destroy)
+                    self.master.after(600, lambda: messagebox.showwarning(
+                        "Manual Setup Needed",
+                        "maxcso was downloaded but could not be auto-detected.\n\n"
+                        "Use Settings → Tool Paths → maxcso → [Set] to locate it manually.",
+                        parent=self.master))
+            except urllib.error.HTTPError as e:
+                self.log(f"❌ GitHub API error downloading maxcso: {e}")
+                progress_window.after(500, progress_window.destroy)
+                self.master.after(600, lambda: messagebox.showerror(
+                    "Download Failed",
+                    f"Could not fetch maxcso release info (HTTP {e.code}).\n\n"
+                    "Visit https://github.com/unknownbrackets/maxcso/releases\n"
+                    "to download manually.",
+                    parent=self.master))
+            except Exception as e:
+                self.log(f"❌ Failed to download maxcso: {e}")
+                progress_window.after(500, progress_window.destroy)
+                self.master.after(600, lambda: messagebox.showerror(
+                    "Download Failed", f"Error: {e}", parent=self.master))
+
+        threading.Thread(target=do_download, daemon=True).start()
+
+    def _download_file(self, url, dest_path, status_label, progress_window):
+        """Download a file with progress updates to the status label."""
+        req = urllib.request.Request(url, headers={'User-Agent': 'ROM-Converter/1.0'})
+        with urllib.request.urlopen(req, timeout=300) as response:
+            total = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            with open(str(dest_path), 'wb') as f:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total > 0:
+                        pct = downloaded / total * 100
+                        status_label.config(
+                            text=f"Downloading... {downloaded/1024/1024:.1f} / {total/1024/1024:.1f} MB ({pct:.0f}%)")
+                        progress_window.update()
+
+    def download_extract_xiso(self):
+        """Download or install extract-xiso with platform-aware logic."""
+        # Linux: check package managers first
+        if sys.platform != "win32":
+            # Try system package manager
+            for pm_cmd, pkg_name, install_cmd in [
+                (shutil.which("dnf"), "extract-xiso", "sudo dnf install -y extract-xiso"),
+                (shutil.which("apt"), "extract-xiso", "sudo apt install -y extract-xiso"),
+                (shutil.which("pacman"), "extract-xiso", "sudo pacman -S --noconfirm extract-xiso"),
+                (shutil.which("zypper"), "extract-xiso", "sudo zypper install -y extract-xiso"),
+            ]:
+                if pm_cmd:
+                    response = messagebox.askyesno(
+                        "Install extract-xiso",
+                        f"extract-xiso can be installed via your package manager:\n\n"
+                        f"  {install_cmd}\n\n"
+                        f"Would you like ROM Converter to run this command?",
+                        parent=self.master)
+                    if response:
+                        progress_window = Toplevel(self.master)
+                        progress_window.title("Installing extract-xiso")
+                        progress_window.geometry("450x120")
+                        progress_window.transient(self.master)
+                        progress_window.grab_set()
+                        progress_window.configure(bg=COLORS["bg_dark"])
+                        Label(progress_window, text=f"Running: {install_cmd}",
+                              font=self.font_small, fg=COLORS["text_secondary"],
+                              bg=COLORS["bg_dark"]).pack(pady=20)
+                        progress_window.update()
+                        try:
+                            result = subprocess.run(
+                                install_cmd.split(), capture_output=True, text=True, timeout=120)
+                            progress_window.destroy()
+                            if result.returncode == 0 or self.check_extract_xiso():
+                                self._update_tool_status()
+                                self.log("✅ extract-xiso installed via package manager")
+                                messagebox.showinfo("Success",
+                                    "extract-xiso installed successfully!", parent=self.master)
+                                return
+                            else:
+                                self.log(f"⚠️ Package install failed: {result.stderr[:200]}")
+                        except Exception as e:
+                            progress_window.destroy()
+                            self.log(f"⚠️ Package install error: {e}")
+                    break
+            else:
+                messagebox.showinfo("No Package Manager Found",
+                    "Could not detect a supported package manager.\n\n"
+                    "Please install extract-xiso manually or place the binary\n"
+                    "in the application directory.",
+                    parent=self.master)
+                return
+        else:
+            # Windows: download from a known source
+            progress_window = Toplevel(self.master)
+            progress_window.title("Downloading extract-xiso")
+            progress_window.geometry("450x150")
+            progress_window.resizable(False, False)
+            progress_window.transient(self.master)
+            progress_window.grab_set()
+            progress_window.configure(bg=COLORS["bg_dark"])
+            progress_window.lift()
+            progress_window.focus_force()
+
+            Label(progress_window, text="Downloading extract-xiso...", font=self.font_title,
+                  fg=COLORS["text_primary"], bg=COLORS["bg_dark"]).pack(pady=10)
+            progress_bar = ttk.Progressbar(progress_window, mode='indeterminate', length=380)
+            progress_bar.pack(pady=6)
+            progress_bar.start(10)
+            status_label = Label(progress_window, text="Connecting...",
+                                font=self.font_small, fg=COLORS["text_secondary"],
+                                bg=COLORS["bg_dark"])
+            status_label.pack(pady=5)
+            progress_window.update()
+
+            def do_win_download():
+                try:
+                    # Try GitHub releases for extract-xiso
+                    api_url = "https://api.github.com/repos/XboxDev/extract-xiso/releases/latest"
+                    req = urllib.request.Request(api_url, headers={
+                        'User-Agent': 'ROM-Converter',
+                        'Accept': 'application/vnd.github.v3+json'
+                    })
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        release_data = json.loads(resp.read().decode())
+                    asset = None
+                    for a in release_data.get("assets", []):
+                        if a["name"].lower().endswith(".exe"):
+                            asset = a
+                            break
+                    if asset:
+                        dest = self.script_dir / "extract-xiso.exe"
+                        self._download_file(asset["browser_download_url"], dest, status_label, progress_window)
+                    else:
+                        # Fallback to bundled copy
+                        fallback_url = "https://raw.githubusercontent.com/WoofahRayetCode/WlfRyt-Rom-Manager/main/extract-xiso.exe"
+                        self._download_file(fallback_url, self.script_dir / "extract-xiso.exe", status_label, progress_window)
+
+                    self.check_extract_xiso()
+                    if self.extract_xiso_path:
+                        self.save_config()
+                        self._update_tool_status()
+                        self.log("✅ extract-xiso downloaded successfully")
+                        progress_window.after(500, progress_window.destroy)
+                        self.master.after(600, lambda: messagebox.showinfo(
+                            "Success", f"extract-xiso downloaded to:\n{self.extract_xiso_path}", parent=self.master))
+                    else:
+                        progress_window.after(500, progress_window.destroy)
+                        self.master.after(600, lambda: messagebox.showwarning(
+                            "Manual Setup Needed",
+                            "extract-xiso was downloaded but not detected.\nUse Settings → Tool Paths to set it manually.",
+                            parent=self.master))
+                except Exception as e:
+                    self.log(f"❌ Failed to download extract-xiso: {e}")
+                    progress_window.after(500, progress_window.destroy)
+                    self.master.after(600, lambda: messagebox.showerror(
+                        "Download Failed",
+                        f"Error: {e}\n\nDownload manually from:\n"
+                        "https://github.com/XboxDev/extract-xiso/releases",
+                        parent=self.master))
+
+            threading.Thread(target=do_win_download, daemon=True).start()
+
+    def browse_extract_xiso(self):
+        """Allow user to manually select extract-xiso executable."""
+        filetypes = [("Executable files", "*.exe"), ("All files", "*.*")] if sys.platform == "win32" else [("All files", "*")]
+        selected = filedialog.askopenfilename(
+            title="Select extract-xiso executable", filetypes=filetypes)
+        if selected:
+            try:
+                result = subprocess.run([selected], capture_output=True, text=True, timeout=5)
+                output = (result.stdout + result.stderr).lower()
+                if "extract-xiso" in output or "xiso" in output or result.returncode in [0, 1]:
+                    self.extract_xiso_path = selected
+                    self.save_config()
+                    self.log(f"extract-xiso location set to: {selected}")
+                    self._update_tool_status()
+                    messagebox.showinfo("Success", f"extract-xiso location set to:\n{selected}")
+                else:
+                    messagebox.showerror("Error", "Selected file does not appear to be extract-xiso")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to verify extract-xiso:\n{e}")
+
     def show_maxcso_setup_help(self):
-        """Show a detailed setup guide for maxcso"""
-        help_window = Toplevel(self.root)
+        """Show a platform-aware setup guide for maxcso."""
+        help_window = Toplevel(self.master)
         help_window.title("maxcso Setup Guide")
-        help_window.geometry("600x500")
-        
-        # Apply theme to window
+        help_window.geometry("620x540")
+        help_window.transient(self.master)
+        help_window.grab_set()
         help_window.configure(bg=COLORS['bg_dark'])
-        
-        # Create main frame
+        help_window.lift()
+        help_window.focus_force()
+
         main_frame = Frame(help_window, bg=COLORS['bg_dark'])
         main_frame.pack(fill="both", expand=True, padx=15, pady=15)
-        
-        # Title
-        title = Label(main_frame, text="maxcso Setup Guide", font=self.font_title,
-                      fg=COLORS['accent_yellow'], bg=COLORS['bg_dark'])
-        title.pack(anchor="w", pady=(0, 10))
-        
-        # Info text
+
+        Label(main_frame, text="🗜 maxcso Setup Guide", font=self.font_title,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(0, 10))
+
         info_text = Text(main_frame, font=self.font_body, fg=COLORS['text_primary'],
-                        bg=COLORS['bg_light'], wrap="word", height=20, relief="flat", padx=10, pady=10)
+                        bg=COLORS['bg_light'], wrap="word", height=22, relief="flat", padx=10, pady=10)
         info_text.pack(fill="both", expand=True, pady=(0, 10))
-        
-        # Disable editing
-        info_text.config(state="disabled")
-        
-        # Add help content
-        help_content = """maxcso is required for CSO and ZSO output formats.
+
+        if sys.platform == "win32":
+            help_content = """maxcso is required for CSO and ZSO output formats.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OPTION 1: Place in Program Directory (Recommended)
+OPTION 1: Auto-Download (Recommended)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Click [ Download maxcso ] in Settings → Tool Paths to automatically
+fetch the latest release from GitHub.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPTION 2: Place in Program Directory
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 1. Click [ Open GitHub Releases ] below
-2. Download the latest "maxcso.exe" file
-3. Place maxcso.exe in the same folder as rom_converter.py
-4. Restart ROM Converter - it will auto-detect it
-
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OPTION 2: Manual Selection with [ SET ] Button
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-1. Download maxcso.exe from GitHub releases
-2. Save to any location on your computer
-3. Click [ SET ] and browse to select maxcso.exe
-
+2. Download the latest maxcso.exe
+3. Place it in the same folder as rom_converter.py
+4. Restart ROM Converter
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OPTION 3: Add to System PATH (Advanced)
+OPTION 3: Manual Selection with [ Set ] Button
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-1. Download maxcso.exe and place in a folder
-2. Add that folder to Windows PATH
-3. Restart ROM Converter
-
+Use Settings → Tool Paths → maxcso → [Set] to browse and select.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Format Recommendations
@@ -1540,22 +1925,60 @@ Format Recommendations
 
 • CHD: High compatibility, slightly larger files
 • CSO: Good compression, fast decompression
-• ZSO: Best compression, lower CPU usage
-"""
-        
+• ZSO: Best compression, lower CPU usage"""
+        else:
+            help_content = """maxcso is required for CSO and ZSO output formats.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPTION 1: Auto-Download (Recommended)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Click [ Download ] in Settings → Tool Paths to automatically
+fetch the latest release from GitHub.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPTION 2: Place in Program Directory
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Click [ Open GitHub Releases ] below
+2. Download the Linux binary (or compile from source)
+3. Rename to 'maxcso' and place in the app directory
+4. Make executable: chmod +x maxcso
+5. Restart ROM Converter
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OPTION 3: Build from Source
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+git clone https://github.com/unknownbrackets/maxcso
+cd maxcso && make
+cp maxcso /path/to/rom-converter/
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Format Recommendations
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• CHD: High compatibility, slightly larger files
+• CSO: Good compression, fast decompression
+• ZSO: Best compression, lower CPU usage"""
+
         info_text.config(state="normal")
         info_text.insert("1.0", help_content)
         info_text.config(state="disabled")
-        
-        # Button frame
+
         button_frame = Frame(main_frame, bg=COLORS['bg_dark'])
-        button_frame.pack(fill="x", pady=(0, 0))
-        
-        Button(button_frame, text="[ Open GitHub Releases ]", 
-               command=lambda: self.open_maxcso_releases(),
+        button_frame.pack(fill="x")
+
+        Button(button_frame, text="[ Open GitHub Releases ]",
+               command=self.open_maxcso_releases,
                font=self.font_small, bg=COLORS['button_blue'], fg="white",
                activeforeground="white", relief="flat", cursor="hand2").pack(side="left", padx=(0, 5))
-        
+
+        Button(button_frame, text="[ Download Now ]",
+               command=lambda: [help_window.destroy(), self.download_maxcso()],
+               font=self.font_small, bg=COLORS['button_green'], fg="white",
+               activeforeground="white", relief="flat", cursor="hand2").pack(side="left", padx=(0, 5))
+
         Button(button_frame, text="[ Close ]", command=help_window.destroy,
                font=self.font_small, bg=COLORS['bg_light'],
                activeforeground="white", relief="flat", cursor="hand2").pack(side="left")
@@ -1586,9 +2009,9 @@ Format Recommendations
                     self.chdman_path = chdman_file
                     self.save_config()
                     self.log(f"chdman location set to: {chdman_file}")
-                    # Update UI label if it exists
                     if hasattr(self, 'chdman_label'):
                         self.chdman_label.config(text=self.chdman_path)
+                    self._update_tool_status()
                     messagebox.showinfo("Success", f"chdman location set to:\n{chdman_file}")
                 else:
                     messagebox.showerror("Error", "Selected file does not appear to be chdman")
@@ -1618,6 +2041,7 @@ Format Recommendations
                     if hasattr(self, 'ndecrypt_label'):
                         self.ndecrypt_label.config(text=self.ndecrypt_path,
                                                   fg=COLORS['text_secondary'])
+                    self._update_tool_status()
                     messagebox.showinfo("Success", f"NDecrypt location set to:\n{ndecrypt_file}")
                 else:
                     messagebox.showerror("Error", "Selected file does not appear to be NDecrypt")
@@ -3440,41 +3864,6 @@ obtained ROM files.
         messagebox.showinfo("Success", f"Successfully downloaded {total} game(s)")
         on_complete()
 
-    def check_extract_xiso(self):
-        """Find extract-xiso executable or prompt to download"""
-        app_xiso = self.script_dir / "extract-xiso.exe"
-        if app_xiso.exists():
-            self.extract_xiso_path = str(app_xiso)
-            return True
-        sys_xiso = shutil.which("extract-xiso")
-        if sys_xiso:
-            self.extract_xiso_path = sys_xiso
-            return True
-        return False
-
-    def extract_xbox_iso(self, iso_path, dest_folder):
-        """Extract Xbox/Xbox 360 ISO using extract-xiso"""
-        if not self.extract_xiso_path:
-            self.log("⚠️  extract-xiso not found. Skipping Xbox extraction.")
-            return False
-        iso_path = Path(iso_path)
-        game_name = iso_path.stem
-        target_dir = Path(dest_folder) / game_name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            cmd = [self.extract_xiso_path, "-x", "-d", str(target_dir), str(iso_path)]
-            creationflags = 0x00000040 if sys.platform == "win32" else 0
-            result = subprocess.run(cmd, capture_output=True, text=True, creationflags=creationflags)
-            if result.returncode == 0:
-                self.log(f"✅ Extracted Xbox ISO: {iso_path.name}")
-                return True
-            else:
-                self.log(f"❌ Failed to extract {iso_path.name}: {result.stderr}")
-                return False
-        except Exception as e:
-            self.log(f"❌ Error extracting Xbox ISO {iso_path.name}: {e}")
-            return False
-
     def ia_login_dialog(self, on_success=None):
         """Open dialog to log in to Internet Archive"""
         if not REQUESTS_AVAILABLE:
@@ -3992,6 +4381,7 @@ obtained ROM files.
                 'chdman_path': self._make_portable_path(self.chdman_path),
                 'seven_zip_path': self._make_portable_path(self.seven_zip_path),
                 'maxcso_path': self._make_portable_path(self.maxcso_path),
+                'extract_xiso_path': self._make_portable_path(self.extract_xiso_path),
                 'ndecrypt_path': self._make_portable_path(self.ndecrypt_path),
                 'ps3_dumper_path': self._make_portable_path(self.ps3_dumper_path),
                 'auto_decrypt_ps3_path': self._make_portable_path(self.auto_decrypt_ps3_path),
@@ -4010,6 +4400,8 @@ obtained ROM files.
                 'threeds_auto_clean_names': self.threeds_auto_clean_names,
                 'threeds_source_dir': self._make_portable_path(self.threeds_source_dir),
                 'threeds_dest_dir': self._make_portable_path(self.threeds_dest_dir),
+                'window_width': self.master.winfo_width() if self.master.winfo_width() > 100 else 1100,
+                'window_height': self.master.winfo_height() if self.master.winfo_height() > 100 else 800,
             }
             with open(self.config_file, 'w') as f:
                 json.dump(config, f, indent=2)
@@ -4061,6 +4453,11 @@ obtained ROM files.
                 saved_maxcso = self._resolve_portable_path(config.get('maxcso_path'))
                 if saved_maxcso and os.path.exists(saved_maxcso):
                     self.maxcso_path = saved_maxcso
+
+                # Restore extract-xiso path if saved and still exists
+                saved_xiso = self._resolve_portable_path(config.get('extract_xiso_path'))
+                if saved_xiso and os.path.exists(saved_xiso):
+                    self.extract_xiso_path = saved_xiso
                 
                 # Restore ndecrypt path if saved and still exists
                 saved_ndecrypt = self._resolve_portable_path(config.get('ndecrypt_path'))
@@ -4265,9 +4662,8 @@ obtained ROM files.
                 f.configure(family=fam)
 
     def apply_theme(self):
-        """Apply current theme colors across the UI"""
+        """Apply current theme colors across the UI."""
         self.update_font_families()
-        # Update ttk progress style
         style = ttk.Style()
         style.configure("Retro.Horizontal.TProgressbar",
                         troughcolor=COLORS['bg_light'],
@@ -4275,59 +4671,312 @@ obtained ROM files.
                         darkcolor=COLORS['button_green'],
                         lightcolor=COLORS['text_primary'],
                         bordercolor=COLORS['text_primary'])
+        style.configure("Retro.TNotebook", background=COLORS['bg_dark'], borderwidth=0)
+        style.configure("Retro.TNotebook.Tab", background=COLORS['bg_medium'],
+                       foreground=COLORS['text_secondary'], padding=[18, 6],
+                       font=self.font_label_bold)
+        style.map("Retro.TNotebook.Tab",
+                  background=[("selected", COLORS['button_blue'])],
+                  foreground=[("selected", "white")])
 
-        # Window background
         self.master.configure(bg=COLORS['bg_dark'])
-        for widget in [self.main_frame, getattr(self, 'title_frame', None), getattr(self, 'options_frame', None)]:
-            if widget:
-                widget.configure(bg=COLORS['bg_dark'] if widget is self.main_frame else COLORS['bg_light'])
-
-        # Header labels
-        for lbl in [getattr(self, 'status_label', None), getattr(self, 'metrics_label', None)]:
-            if lbl:
-                lbl.configure(bg=COLORS['bg_light'] if lbl is self.status_label else COLORS['bg_medium'],
-                              fg=COLORS['text_primary'] if lbl is self.status_label else COLORS['accent_yellow'])
-
-        # Inputs and labels
-        for inp in [getattr(self, 'dir_entry', None)]:
-            if inp:
-                inp.configure(bg=COLORS['bg_input'], fg=COLORS['text_primary'], insertbackground=COLORS['text_primary'])
-        for lbl in [getattr(self, 'chdman_label', None), getattr(self, 'seven_zip_label', None), getattr(self, 'maxcso_label', None)]:
-            if lbl:
-                lbl.configure(bg=COLORS['bg_dark'], fg=COLORS['text_secondary'])
-
-        # Buttons
-        buttons = [
-            getattr(self, 'scan_button', None), getattr(self, 'convert_button', None),
-            getattr(self, 'stop_button', None), getattr(self, 'move_chd_button', None),
-            getattr(self, 'cleanup_button', None), getattr(self, 'clean_names_button', None),
-            getattr(self, 'extract_archives_button', None), getattr(self, 'decrypt_3ds_button', None),
-            getattr(self, 'bios_download_button', None)
-        ]
-        for btn in buttons:
-            if btn:
-                btn.configure(activebackground=COLORS['text_primary'])
-        # Log area
-        if getattr(self, 'log_text', None):
-            self.log_text.configure(bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
-                                    insertbackground=COLORS['text_primary'],
-                                    selectbackground=COLORS['accent_purple'])
-        # Progress bar
-        if getattr(self, 'progress', None):
-            self.progress.configure(style="Retro.Horizontal.TProgressbar")
-
-        # Title frame background
-        if getattr(self, 'title_frame', None):
+        if self.main_frame:
+            self.main_frame.configure(bg=COLORS['bg_dark'])
+        if self.title_frame:
             self.title_frame.configure(bg=COLORS['bg_light'])
             for child in self.title_frame.winfo_children():
                 try:
-                    child.configure(bg=COLORS['bg_light'], fg=COLORS['text_primary'])
+                    child.configure(bg=COLORS['bg_light'])
+                    if isinstance(child, Frame):
+                        for sub in child.winfo_children():
+                            try:
+                                sub.configure(bg=COLORS['bg_light'])
+                            except Exception:
+                                pass
                 except Exception:
                     pass
+
+        # Tool status bar
+        if hasattr(self, '_tool_status_frame'):
+            self._tool_status_frame.configure(bg=COLORS['bg_medium'])
+            self._tool_status_label.configure(bg=COLORS['bg_medium'], fg=COLORS['text_secondary'])
+
+        # Status / metrics bars
+        if self.status_label:
+            self.status_label.configure(bg=COLORS['bg_light'], fg=COLORS['text_primary'])
+        if self.metrics_label:
+            self.metrics_label.configure(bg=COLORS['bg_medium'], fg=COLORS['accent_yellow'])
+
+        # Entry
+        if self.dir_entry:
+            self.dir_entry.configure(bg=COLORS['bg_input'], fg=COLORS['text_primary'],
+                                     insertbackground=COLORS['text_primary'])
+
+        # Tool path labels
+        for lbl in [self.chdman_label, self.seven_zip_label, self.maxcso_label,
+                    getattr(self, 'ndecrypt_label', None), getattr(self, 'ps3_dumper_label', None)]:
+            if lbl:
+                try:
+                    lbl.configure(bg=COLORS['bg_medium'], fg=COLORS['text_secondary'])
+                except Exception:
+                    pass
+
+        # Buttons
+        for btn in [self.scan_button, self.convert_button, self.stop_button, self.move_chd_button,
+                    self.cleanup_button, self.clean_names_button, self.extract_archives_button,
+                    self.decrypt_3ds_button, self.ia_browser_button, self.bios_download_button]:
+            if btn:
+                try:
+                    btn.configure(activebackground=COLORS['text_primary'])
+                except Exception:
+                    pass
+
+        # Log
+        if self.log_text:
+            self.log_text.configure(bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
+                                    insertbackground=COLORS['text_primary'],
+                                    selectbackground=COLORS['accent_purple'])
+        if self.progress:
+            self.progress.configure(style="Retro.Horizontal.TProgressbar")
+
+        # Collapsible frames
+        if hasattr(self, 'options_frame'):
+            self.options_frame.set_colors(COLORS['bg_light'], COLORS['accent_pink'])
+
+        # Bottom bar
+        if hasattr(self, '_bottom_bar'):
+            self._bottom_bar.configure(bg=COLORS['bg_dark'])
     
+    def _load_window_size(self):
+        """Load persisted window size from config."""
+        try:
+            if self.config_file.exists():
+                with open(self.config_file, 'r') as f:
+                    config = json.load(f)
+                return config.get("window_width", 1100), config.get("window_height", 800)
+        except Exception:
+            pass
+        return 1100, 800
+
+    def _save_window_size(self):
+        """Persist current window size."""
+        try:
+            self.save_config()
+        except Exception:
+            pass
+
+    def _on_window_resize(self, event=None):
+        """Throttled window resize handler."""
+        if not hasattr(self, "_resize_after_id"):
+            self._resize_after_id = None
+        if self._resize_after_id:
+            self.master.after_cancel(self._resize_after_id)
+        self._resize_after_id = self.master.after(500, self._save_window_size)
+
+    def _on_drop(self, event):
+        """Handle drag-and-drop of ROM directory."""
+        data = event.data
+        if data:
+            # Strip braces from paths with spaces on Windows, or handle URL-encoded paths
+            path = data.strip()
+            if path.startswith("{") and path.endswith("}"):
+                path = path[1:-1]
+            if os.path.isdir(path):
+                self.source_dir = path
+                self.dir_entry.delete(0, "end")
+                self.dir_entry.insert(0, path)
+                self.save_config()
+                self.log(f"📁 Dropped directory: {path}")
+            elif os.path.isfile(path) and os.path.isdir(os.path.dirname(path)):
+                self.source_dir = os.path.dirname(path)
+                self.dir_entry.delete(0, "end")
+                self.dir_entry.insert(0, self.source_dir)
+                self.save_config()
+                self.log(f"📁 Set directory from dropped file: {self.source_dir}")
+
+    def _read_config_file(self):
+        """Read the config file as a dict."""
+        try:
+            if self.config_file.exists():
+                with open(self.config_file, "r") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _write_config_file(self, config):
+        """Write config dict to file."""
+        try:
+            with open(self.config_file, "w") as f:
+                json.dump(config, f, indent=2)
+        except Exception:
+            pass
+
+    def _is_first_run(self):
+        """Check if this is the first run (no ROM dir configured)."""
+        return not self.source_dir and not self.config_file.exists()
+
+    def _show_quick_start(self):
+        """Show simplified Quick-Start wizard for first-time users."""
+        qs = Toplevel(self.master)
+        qs.title("Quick Start Wizard")
+        qs.geometry("550x420")
+        qs.resizable(False, False)
+        qs.transient(self.master)
+        qs.grab_set()
+        qs.configure(bg=COLORS["bg_dark"])
+        qs.lift()
+        qs.focus_force()
+
+        # Header
+        header = Frame(qs, bg=COLORS["bg_light"], pady=12)
+        header.pack(fill="x")
+        Label(header, text="⚡ Welcome to ROM Converter!", font=self.font_title,
+              fg=COLORS["text_primary"], bg=COLORS["bg_light"]).pack()
+        Label(header, text="Let's get you set up in 3 steps.",
+              font=self.font_small, fg=COLORS["text_secondary"], bg=COLORS["bg_light"]).pack(pady=(4, 0))
+
+        content = Frame(qs, bg=COLORS["bg_dark"], padx=20, pady=15)
+        content.pack(fill="both", expand=True)
+
+        # Step 1: ROM Directory
+        Label(content, text="Step 1: Select your ROM directory",
+              font=self.font_label_bold, fg=COLORS["accent_yellow"], bg=COLORS["bg_dark"]).pack(anchor="w")
+        dir_row = Frame(content, bg=COLORS["bg_dark"])
+        dir_row.pack(fill="x", pady=(4, 12))
+        dir_entry_qs = Entry(dir_row, font=self.font_body,
+                             bg=COLORS["bg_input"], fg=COLORS["text_primary"],
+                             insertbackground=COLORS["text_primary"], relief="flat")
+        dir_entry_qs.pack(side="left", fill="x", expand=True, ipady=4)
+        if self.source_dir:
+            dir_entry_qs.insert(0, self.source_dir)
+        Button(dir_row, text="Browse", command=lambda: self._qs_browse(dir_entry_qs),
+               font=self.font_small, bg=COLORS["bg_light"], fg=COLORS["text_secondary"],
+               relief="flat", cursor="hand2").pack(side="left", padx=(8, 0))
+
+        # Step 2: Systems
+        Label(content, text="Step 2: Select systems to convert",
+              font=self.font_label_bold, fg=COLORS["accent_yellow"], bg=COLORS["bg_dark"]).pack(anchor="w")
+        sys_frame = Frame(content, bg=COLORS["bg_medium"])
+        sys_frame.pack(fill="x", pady=(4, 12))
+
+        qs_system_vars = {}
+        systems_row1 = ["PlayStation (PS1)", "PlayStation 2", "PSP"]
+        systems_row2 = ["Xbox", "PlayStation 3", "Dreamcast"]
+        for i, systems in enumerate([systems_row1, systems_row2]):
+            row = Frame(sys_frame, bg=COLORS["bg_medium"])
+            row.pack(fill="x", padx=8, pady=4)
+            for sys_name in systems:
+                var = BooleanVar(value=(sys_name in ["PlayStation (PS1)", "PlayStation 2"]))
+                qs_system_vars[sys_name] = var
+                cb = Checkbutton(row, text=sys_name, variable=var,
+                                 font=self.font_small, fg=COLORS["text_primary"],
+                                 bg=COLORS["bg_medium"], selectcolor=COLORS["bg_dark"],
+                                 activebackground=COLORS["bg_medium"],
+                                 activeforeground=COLORS["text_primary"])
+                cb.pack(side="left", padx=4)
+
+        # Step 3: Format
+        Label(content, text="Step 3: Choose output format",
+              font=self.font_label_bold, fg=COLORS["accent_yellow"], bg=COLORS["bg_dark"]).pack(anchor="w")
+        fmt_frame = Frame(content, bg=COLORS["bg_dark"])
+        fmt_frame.pack(fill="x", pady=(4, 16))
+        fmt_var = StringVar(value="CHD (Recommended)")
+        for fmt in ["CHD (Recommended)", "ISO", "CSO", "ZSO"]:
+            rb = Radiobutton(fmt_frame, text=fmt, variable=fmt_var, value=fmt,
+                             font=self.font_small, fg=COLORS["text_primary"],
+                             bg=COLORS["bg_dark"], selectcolor=COLORS["bg_dark"],
+                             activebackground=COLORS["bg_dark"],
+                             activeforeground=COLORS["text_primary"])
+            rb.pack(side="left", padx=(0, 16))
+
+        # Action buttons
+        btn_row = Frame(content, bg=COLORS["bg_dark"])
+        btn_row.pack(fill="x", pady=(0, 8))
+
+        def apply_quick_start():
+            dir_path = dir_entry_qs.get().strip()
+            if dir_path and os.path.isdir(dir_path):
+                self.source_dir = dir_path
+                self.dir_entry.delete(0, "end")
+                self.dir_entry.insert(0, dir_path)
+            selected_systems = [s for s, v in qs_system_vars.items() if v.get()]
+            # Map system names to checkboxes
+            system_map = {
+                "PlayStation (PS1)": "ps1", "PlayStation 2": "ps2",
+                "PSP": "psp", "Xbox": "xbox", "PlayStation 3": "ps3",
+            }
+            for sys_name, key in system_map.items():
+                if sys_name in selected_systems:
+                    if key == "ps1":
+                        self.process_ps1_cues.set(True)
+                    elif key == "ps2":
+                        self.process_ps2_isos.set(True)
+                    elif key == "psp":
+                        self.process_psp_isos.set(True)
+                    elif key == "xbox":
+                        self.process_xbox_isos.set(True)
+                    elif key == "ps3":
+                        self.process_ps3_isos.set(True)
+            chosen_fmt = fmt_var.get()
+            if "CHD" in chosen_fmt:
+                self.ps1_output_format = "CHD"
+                self.ps2_output_format = "CHD"
+            elif "ISO" in chosen_fmt:
+                self.ps1_output_format = "ISO"
+                self.ps2_output_format = "ISO"
+            elif chosen_fmt == "CSO":
+                self.ps1_output_format = "CHD"
+                self.ps2_output_format = "CSO"
+            elif chosen_fmt == "ZSO":
+                self.ps1_output_format = "CHD"
+                self.ps2_output_format = "ZSO"
+            self.ps1_format_combo.set(self.ps1_output_format)
+            self.ps2_format_combo.set(self.ps2_output_format)
+            if self.psp_output_format:
+                self.psp_format_combo.set(self.psp_output_format)
+            self.save_config()
+            self.log("✅ Quick Start configuration applied. Ready to convert!")
+            qs.destroy()
+
+        Button(btn_row, text="⚡ Get Started!", command=apply_quick_start,
+               font=self.font_button, bg=COLORS["button_green"], fg=COLORS["bg_dark"],
+               activebackground=COLORS["text_primary"], relief="flat", cursor="hand2",
+               padx=24, pady=6).pack(side="left", padx=(0, 12))
+        Button(btn_row, text="Skip", command=qs.destroy,
+               font=self.font_small, bg=COLORS["bg_medium"], fg=COLORS["text_muted"],
+               relief="flat", cursor="hand2", padx=16, pady=4).pack(side="left")
+
+        Label(content, text="Tip: Drag & drop a ROM folder onto the main window anytime!",
+              font=self.font_small, fg=COLORS["text_muted"], bg=COLORS["bg_dark"]).pack()
+
+    def _qs_browse(self, entry_widget):
+        """Browse for a directory in the Quick-Start wizard."""
+        directory = filedialog.askdirectory(title="Select ROM Directory")
+        if directory:
+            entry_widget.delete(0, "end")
+            entry_widget.insert(0, directory)
+
+    def _active_tab(self):
+        """Return the name of the currently active notebook tab."""
+        try:
+            return self._notebook.tab(self._notebook.select(), "text")
+        except Exception:
+            return "Convert"
+
+    def _toggle_log(self):
+        """Toggle the log panel visibility."""
+        if self.log_visible:
+            self._log_frame.pack_forget()
+            self._log_toggle_btn.config(text="▲ Show Log")
+            self.log_visible = False
+        else:
+            self._log_frame.pack(fill="both", expand=True, before=self._bottom_bar)
+            self._log_toggle_btn.config(text="▼ Hide Log")
+            self.log_visible = True
+
     def setup_ui(self):
-        """Setup the user interface with retro gaming aesthetic"""
-        # Configure ttk styles for retro look
+        """Setup the user interface with tabbed retro gaming aesthetic."""
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("Retro.Horizontal.TProgressbar",
@@ -4336,510 +4985,433 @@ obtained ROM files.
                        darkcolor=COLORS['button_green'],
                        lightcolor=COLORS['text_primary'],
                        bordercolor=COLORS['text_primary'])
-        
-        # Main container with dark background
-        self.main_frame = Frame(self.master, padx=15, pady=15, bg=COLORS['bg_dark'])
-        self.main_frame.pack(fill="both", expand=True)
-        
-        # Title banner
-        title_frame = Frame(self.main_frame, bg=COLORS['bg_light'], pady=8)
-        title_frame.pack(fill="x", pady=(0, 15))
-        self.title_frame = title_frame
-        
-        title_label = Label(title_frame, text="◄ ROM CONVERTER ►", 
-                   font=self.font_title,
-                           fg=COLORS['text_primary'], bg=COLORS['bg_light'])
-        title_label.pack()
+        # Notebook tab style
+        style.configure("Retro.TNotebook", background=COLORS['bg_dark'], borderwidth=0)
+        style.configure("Retro.TNotebook.Tab", background=COLORS['bg_medium'],
+                       foreground=COLORS['text_secondary'], padding=[18, 6],
+                       font=self.font_label_bold)
+        style.map("Retro.TNotebook.Tab",
+                  background=[("selected", COLORS['button_blue'])],
+                  foreground=[("selected", "white")])
 
-        # Theme selector
-        theme_frame = Frame(title_frame, bg=COLORS['bg_light'])
-        theme_frame.pack(pady=(6, 0))
-        Label(theme_frame, text="Theme:", font=self.font_label_bold,
+        # --- Main container ---
+        self.main_frame = Frame(self.master, padx=8, pady=6, bg=COLORS['bg_dark'])
+        self.main_frame.pack(fill="both", expand=True)
+
+        # --- Title banner ---
+        self.title_frame = Frame(self.main_frame, bg=COLORS['bg_light'], pady=6)
+        self.title_frame.pack(fill="x", pady=(0, 8))
+        Label(self.title_frame, text="◄ ROM CONVERTER ►", font=self.font_title,
+              fg=COLORS['text_primary'], bg=COLORS['bg_light']).pack()
+
+        # Theme selector + About in title bar
+        theme_row = Frame(self.title_frame, bg=COLORS['bg_light'])
+        theme_row.pack(pady=(4, 0))
+        Label(theme_row, text="Theme:", font=self.font_label_bold,
               fg=COLORS['text_secondary'], bg=COLORS['bg_light']).pack(side="left", padx=(0, 6))
-        self.theme_combo = ttk.Combobox(theme_frame, values=list(THEME_PRESETS.keys()),
+        self.theme_combo = ttk.Combobox(theme_row, values=list(THEME_PRESETS.keys()),
                                         state="readonly", width=8)
         if self.current_theme not in THEME_PRESETS:
             self.current_theme = 'PS2'
         self.theme_combo.set(self.current_theme)
         self.theme_combo.pack(side="left")
-
-        def on_theme_change(event=None):
-            chosen = self.theme_combo.get()
-            self.set_theme_colors(chosen)
-            self.update_font_families()
-            self.save_config()
-            self.apply_theme()
-            self.log(f"🖌 Theme set to {chosen}.")
-
-        self.theme_combo.bind("<<ComboboxSelected>>", on_theme_change)
-        
-        # About button
-        Button(theme_frame, text="ℹ️ About", command=self.about_dialog,
+        self.theme_combo.bind("<<ComboboxSelected>>", lambda e: (
+            self.set_theme_colors(self.theme_combo.get()),
+            self.update_font_families(),
+            self.save_config(),
+            self.apply_theme(),
+            self.log(f"🖌 Theme set to {self.theme_combo.get()}.")
+        ))
+        Button(theme_row, text="ℹ️ About", command=self.about_dialog,
                font=self.font_small, bg=COLORS['bg_medium'],
                fg=COLORS['text_secondary'], relief="flat", cursor="hand2",
                padx=8).pack(side="left", padx=(15, 0))
-        
-        # Directory selection
-        dir_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        dir_frame.pack(fill="x", pady=(0, 8))
-        
-        Label(dir_frame, text="📁 ROM Directory:", font=self.font_label_bold,
-              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
-        
-        self.dir_entry = Entry(dir_frame, font=self.font_body,
+
+        # --- Tool status indicator ---
+        self._tool_status_frame = Frame(self.main_frame, bg=COLORS['bg_medium'], pady=3)
+        self._tool_status_frame.pack(fill="x", pady=(0, 6))
+        self._tool_status_label = Label(self._tool_status_frame,
+            text=self._build_tool_status_text(),
+            font=self.font_small, fg=COLORS['text_muted'], bg=COLORS['bg_medium'], anchor="w")
+        self._tool_status_label.pack(fill="x", padx=8)
+
+        # --- Tabbed notebook ---
+        self._notebook = ttk.Notebook(self.main_frame, style="Retro.TNotebook")
+        self._notebook.pack(fill="both", expand=True)
+
+        # === CONVERT TAB ===
+        convert_tab = Frame(self._notebook, bg=COLORS['bg_dark'])
+        self._notebook.add(convert_tab, text="  Convert  ")
+
+        # ROM directory row
+        dir_row = Frame(convert_tab, bg=COLORS['bg_dark'])
+        dir_row.pack(fill="x", pady=(8, 4))
+        Label(dir_row, text="📁 ROM Directory:", font=self.font_label_bold,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 8))
+        self.dir_entry = Entry(dir_row, font=self.font_body,
                               bg=COLORS['bg_input'], fg=COLORS['text_primary'],
                               insertbackground=COLORS['text_primary'],
                               relief="flat", highlightthickness=1,
                               highlightcolor=COLORS['text_secondary'],
                               highlightbackground=COLORS['text_muted'])
-        self.dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 10), ipady=4)
+        self.dir_entry.pack(side="left", fill="x", expand=True, padx=(0, 6), ipady=4)
         if self.source_dir:
             self.dir_entry.insert(0, self.source_dir)
-        
-        Button(dir_frame, text="[ BROWSE ]", command=self.browse_directory,
+        Button(dir_row, text="Browse", command=self.browse_directory,
                font=self.font_small, bg=COLORS['bg_light'],
                fg=COLORS['text_secondary'], activebackground=COLORS['accent_purple'],
-               activeforeground="white", relief="flat", cursor="hand2").pack(side="left")
-        
-        # chdman location
-        chdman_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        chdman_frame.pack(fill="x", pady=(0, 8))
-        
-        Label(chdman_frame, text="⚙ chdman:", font=self.font_label_bold,
-              fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
-        self.chdman_label = Label(chdman_frame, text=self.chdman_path or "Not set",
-                                  font=self.font_small,
-                                  fg=COLORS['text_secondary'], bg=COLORS['bg_dark'], anchor="w")
-        self.chdman_label.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        Button(chdman_frame, text="[ CHANGE ]", command=self.browse_chdman,
-               font=self.font_small, bg=COLORS['button_blue'],
-               fg="white", activebackground=COLORS['accent_purple'],
-               activeforeground="white", relief="flat", cursor="hand2").pack(side="left")
-        
-        # 7-Zip location
-        seven_zip_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        seven_zip_frame.pack(fill="x", pady=(0, 12))
-        
-        Label(seven_zip_frame, text="📦 7-Zip:", font=self.font_label_bold,
-              fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
-        self.seven_zip_label = Label(seven_zip_frame, 
-                                     text=self.seven_zip_path or "Not set (optional for .7z/.rar)",
-                                     font=self.font_small,
-                                     fg=COLORS['text_secondary'] if self.seven_zip_path else COLORS['text_muted'],
-                                     bg=COLORS['bg_dark'], anchor="w")
-        self.seven_zip_label.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        Button(seven_zip_frame, text="[ SET ]", command=self.browse_7zip,
-               font=self.font_small, bg=COLORS['button_blue'],
-               fg="white", activebackground=COLORS['accent_purple'],
-               activeforeground="white", relief="flat", cursor="hand2").pack(side="left")
+               activeforeground="white", relief="flat", cursor="hand2",
+               padx=10).pack(side="left")
 
-        # maxcso location (for CSO/ZSO output)
-        maxcso_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        maxcso_frame.pack(fill="x", pady=(0, 8))
-
-        Label(maxcso_frame, text="🗜  maxcso:", font=self.font_label_bold,
-              fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
-        self.maxcso_label = Label(maxcso_frame, 
-                        text=self.maxcso_path or "Not set (required for CSO/ZSO)",
-                        font=self.font_small,
-                                   fg=COLORS['text_secondary'] if self.maxcso_path else COLORS['text_muted'],
-                                   bg=COLORS['bg_dark'], anchor="w")
-        self.maxcso_label.pack(side="left", fill="x", expand=True)
-        
-        # NDecrypt path display (for 3DS decryption)
-        ndecrypt_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        ndecrypt_frame.pack(fill="x", pady=(0, 12))
-
-        Label(ndecrypt_frame, text="🔓 NDecrypt:", font=self.font_label_bold,
-              fg=COLORS['accent_purple'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
-        self.ndecrypt_label = Label(ndecrypt_frame, 
-                        text=self.ndecrypt_path or "Not set (required for 3DS decryption)",
-                        font=self.font_small,
-                                   fg=COLORS['text_secondary'] if self.ndecrypt_path else COLORS['text_muted'],
-                                   bg=COLORS['bg_dark'], anchor="w")
-        self.ndecrypt_label.pack(side="left", fill="x", expand=True)
-        
-        Button(ndecrypt_frame, text="[ SET ]", command=self.browse_ndecrypt,
-               font=self.font_small, bg=COLORS['bg_light'],
-               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left", padx=2)
-        
-        Button(ndecrypt_frame, text="[ DOWNLOAD ]", command=self.download_ndecrypt,
-               font=self.font_small, bg=COLORS['accent_purple'],
-               fg="white", relief="flat", cursor="hand2").pack(side="left", padx=2)
-        
-        # PS3 Disc Dumper location
-        ps3_dumper_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        ps3_dumper_frame.pack(fill="x", pady=(0, 12))
-        
-        Label(ps3_dumper_frame, text="🎮 PS3 Dumper:", font=self.font_label_bold,
-              fg=COLORS['accent_yellow'], bg=COLORS['bg_dark']).pack(side="left", padx=(0, 10))
-        self.ps3_dumper_label = Label(ps3_dumper_frame, 
-                                     text=self.ps3_dumper_path or "Not set (required for PS3 ISOs)",
-                                     font=self.font_small,
-                                     fg=COLORS['text_secondary'] if self.ps3_dumper_path else COLORS['text_muted'],
-                                     bg=COLORS['bg_dark'], anchor="w")
-        self.ps3_dumper_label.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        
-        def browse_ps3_dumper():
-            filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
-            selected = filedialog.askopenfilename(title="Select ps3-disc-dumper executable", filetypes=filetypes)
-            if selected:
-                self.ps3_dumper_path = selected
-                self.ps3_dumper_label.config(text=self.ps3_dumper_path, fg=COLORS['text_secondary'])
-                self.save_config()
-
-        Button(ps3_dumper_frame, text="[ SET ]", command=browse_ps3_dumper,
-               font=self.font_small, bg=COLORS['bg_light'],
-               fg=COLORS['text_secondary'], relief="flat", cursor="hand2").pack(side="left", padx=2)
-        
-        Button(ps3_dumper_frame, text="[ DOWNLOAD ]", command=self.download_ps3_dumper,
-               font=self.font_small, bg=COLORS['accent_purple'],
-               fg="white", relief="flat", cursor="hand2").pack(side="left", padx=2)
-        
-        # Options panel
-        options_frame = Frame(self.main_frame, bg=COLORS['bg_light'], padx=10, pady=8)
-        options_frame.pack(fill="x", pady=(0, 12))
-        self.options_frame = options_frame
-        
-        options_title = Label(options_frame, text="▼ OPTIONS ▼", font=self.font_label_bold,
-                             fg=COLORS['accent_pink'], bg=COLORS['bg_light'])
-        options_title.pack(anchor="w", pady=(0, 5))
-        
-        # Custom checkbox style
-        cb_font = self.font_small
+        # --- Collapsible: General Options ---
+        self.options_frame = CollapsibleFrame(convert_tab, title="⚙ General Options",
+            font=self.font_label_bold, fg=COLORS['accent_pink'],
+            bg=COLORS['bg_light'], collapsed=True)
+        self.options_frame.pack(fill="x", pady=(6, 2))
         cb_bg = COLORS['bg_light']
-        
-        Checkbutton(options_frame, text="↳ Scan subdirectories recursively",
-                   variable=self.recursive, font=cb_font,
-                   fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                   activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-        
-        Checkbutton(options_frame, text="↳ Move originals to backup folder after conversion",
-                   variable=self.move_to_backup, font=cb_font,
-                   fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                   activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-        
-        Checkbutton(options_frame, text="⚠ Delete original files after successful conversion",
-                   variable=self.delete_originals, font=cb_font,
-                   fg=COLORS['accent_red'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                   activebackground=cb_bg, activeforeground=COLORS['accent_red']).pack(anchor="w")
+        cb_font = self.font_small
+        for txt, var, fg_color in [
+            ("Scan subdirectories recursively", self.recursive, COLORS['text_primary']),
+            ("Move originals to backup folder after conversion", self.move_to_backup, COLORS['text_primary']),
+            ("⚠ Delete original files after successful conversion", self.delete_originals, COLORS['accent_red']),
+        ]:
+            Checkbutton(self.options_frame.content, text=txt, variable=var,
+                       font=cb_font, fg=fg_color, bg=cb_bg, selectcolor=COLORS['bg_dark'],
+                       activebackground=cb_bg, activeforeground=fg_color).pack(anchor="w")
 
-        Checkbutton(options_frame, text="🎮 Process PS1 CUE files (.cue)",
-                variable=self.process_ps1_cues, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
+        # --- Collapsible: System Filters ---
+        sys_filter = CollapsibleFrame(convert_tab, title="🎮 System Filters",
+            font=self.font_label_bold, fg=COLORS['accent_yellow'],
+            bg=COLORS['bg_medium'], collapsed=True)
+        sys_filter.pack(fill="x", pady=(0, 2))
+        sys_content = sys_filter.content
+        # Select All / None row
+        sel_row = Frame(sys_content, bg=COLORS['bg_medium'])
+        sel_row.pack(fill="x", pady=(2, 4))
+        system_vars = [
+            ("PS1 CUE", self.process_ps1_cues), ("PS2 BIN/CUE", self.process_ps2_cues),
+            ("PS2 ISO", self.process_ps2_isos), ("Xbox ISO", self.process_xbox_isos),
+            ("PSP ISO", self.process_psp_isos), ("PS3 ISO", self.process_ps3_isos),
+            ("NES ROMs", self.process_nes_roms), ("SNES ROMs", self.process_snes_roms),
+            ("N64 ROMs", self.process_n64_roms),
+        ]
+        def _sel_all():
+            for _, v in system_vars: v.set(True)
+        def _sel_none():
+            for _, v in system_vars: v.set(False)
+        Button(sel_row, text="All", command=_sel_all,
+               font=self.font_small, bg=COLORS['bg_light'], fg=COLORS['text_secondary'],
+               relief="flat", cursor="hand2", padx=6).pack(side="left", padx=(0, 4))
+        Button(sel_row, text="None", command=_sel_none,
+               font=self.font_small, bg=COLORS['bg_light'], fg=COLORS['text_secondary'],
+               relief="flat", cursor="hand2", padx=6).pack(side="left")
+        # Grid of system checkboxes
+        grid = Frame(sys_content, bg=COLORS['bg_medium'])
+        grid.pack(fill="x")
+        for i, (label, var) in enumerate(system_vars):
+            row, col = divmod(i, 3)
+            Checkbutton(grid, text=label, variable=var, font=cb_font,
+                       fg=COLORS['text_primary'], bg=COLORS['bg_medium'],
+                       selectcolor=COLORS['bg_dark'],
+                       activebackground=COLORS['bg_medium'],
+                       activeforeground=COLORS['text_primary']).grid(row=row, column=col, sticky="w", padx=4, pady=1)
 
-        Checkbutton(options_frame, text="🎮 Process PS2 BIN/CUE files (.cue)",
-            variable=self.process_ps2_cues, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="🎮 Process PS2 ISO files (.iso)",
-                variable=self.process_ps2_isos, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="💚 Process Xbox ISO files (.iso/.xiso → EXTRACT)",
-                variable=self.process_xbox_isos, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="🎮 Process PSP ISO files (.iso → CSO/ZSO)",
-                variable=self.process_psp_isos, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="🎮 Process PS3 ISO files (.iso → DECRYPT)",
-                variable=self.process_ps3_isos, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="🎮 Process NES ROM files (.nes)",
-                variable=self.process_nes_roms, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="🎮 Process SNES ROM files (.sfc/.smc/.snes)",
-                variable=self.process_snes_roms, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        Checkbutton(options_frame, text="🎮 Process N64 ROM files (.n64/.z64/.v64)",
-                variable=self.process_n64_roms, font=cb_font,
-            fg=COLORS['text_primary'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-            activebackground=cb_bg, activeforeground=COLORS['text_primary']).pack(anchor="w")
-
-        # PS1 output format selector
-        ps1_format_frame = Frame(options_frame, bg=cb_bg)
-        ps1_format_frame.pack(fill="x", pady=(4, 2))
-        Label(ps1_format_frame, text="↳ PS1 output format:", font=self.font_label_bold,
-              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
-        self.ps1_format_combo = ttk.Combobox(ps1_format_frame, values=PS1_OUTPUT_FORMATS,
-                            state="readonly", width=6)
-        if not hasattr(self, 'ps1_output_format') or self.ps1_output_format not in PS1_OUTPUT_FORMATS:
-            self.ps1_output_format = 'CHD'
+        # --- Collapsible: Output Formats ---
+        fmt_section = CollapsibleFrame(convert_tab, title="📀 Output Formats",
+            font=self.font_label_bold, fg=COLORS['button_green'],
+            bg=COLORS['bg_light'], collapsed=False)
+        fmt_section.pack(fill="x", pady=(0, 2))
+        c = fmt_section.content
+        # PS1
+        r1 = Frame(c, bg=COLORS['bg_light'])
+        r1.pack(fill="x", pady=2)
+        Label(r1, text="PS1:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_light']).pack(side="left", padx=(0, 6))
+        self.ps1_format_combo = ttk.Combobox(r1, values=PS1_OUTPUT_FORMATS, state="readonly", width=6)
         self.ps1_format_combo.set(self.ps1_output_format)
-        self.ps1_format_combo.pack(side="left", padx=8)
-
-        def on_ps1_format_change(event=None):
-            self.ps1_output_format = self.ps1_format_combo.get()
-            self.save_config()
-
-        self.ps1_format_combo.bind("<<ComboboxSelected>>", on_ps1_format_change)
-
-        # Emulator preset selection
-        emulator_frame = Frame(options_frame, bg=cb_bg)
-        emulator_frame.pack(fill="x", pady=(4, 2))
-        Label(emulator_frame, text="↳ PS2 emulator:", font=self.font_label_bold,
-              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
-        self.ps2_emulator_combo = ttk.Combobox(emulator_frame, values=PS2_EMULATORS,
-                                               state="readonly", width=10)
-        if self.ps2_emulator not in PS2_EMULATORS:
-            self.ps2_emulator = 'PCSX2'
+        self.ps1_format_combo.pack(side="left")
+        self.ps1_format_combo.bind("<<ComboboxSelected>>", lambda e: setattr(self, 'ps1_output_format', self.ps1_format_combo.get()) or self.save_config())
+        # PS2
+        r2 = Frame(c, bg=COLORS['bg_light'])
+        r2.pack(fill="x", pady=2)
+        Label(r2, text="PS2:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_light']).pack(side="left", padx=(0, 6))
+        self.ps2_emulator_combo = ttk.Combobox(r2, values=PS2_EMULATORS, state="readonly", width=10)
         self.ps2_emulator_combo.set(self.ps2_emulator)
-        self.ps2_emulator_combo.pack(side="left", padx=8)
-
-        # PS2 output format selector
-        format_frame = Frame(options_frame, bg=cb_bg)
-        format_frame.pack(fill="x", pady=(4, 4))
-        Label(format_frame, text="↳ PS2 output format:", font=self.font_label_bold,
-              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
-        self.ps2_format_combo = ttk.Combobox(format_frame, values=PS2_OUTPUT_FORMATS,
-                            state="readonly", width=6)
-        if self.ps2_output_format not in PS2_OUTPUT_FORMATS:
-            self.ps2_output_format = 'CHD'
+        self.ps2_emulator_combo.pack(side="left", padx=(0, 6))
+        self.ps2_format_combo = ttk.Combobox(r2, values=PS2_OUTPUT_FORMATS, state="readonly", width=6)
         self.ps2_format_combo.set(self.ps2_output_format)
-        self.ps2_format_combo.pack(side="left", padx=8)
-
-        def on_ps2_format_change(event=None):
-            self.ps2_output_format = self.ps2_format_combo.get()
-            self.save_config()
-            if self.ps2_output_format in ['CSO', 'ZSO'] and not self.maxcso_path:
-                self.log("⚠ maxcso is required for CSO/ZSO output. Set the path above.")
-
-        self.ps2_format_combo.bind("<<ComboboxSelected>>", on_ps2_format_change)
-
-        def on_ps2_emulator_change(event=None):
-            self.ps2_emulator = self.ps2_emulator_combo.get()
-            # Apply recommended format for selected emulator
-            recommended = PS2_EMULATOR_RECOMMENDATIONS.get(self.ps2_emulator, 'CHD')
-            if recommended in PS2_OUTPUT_FORMATS:
-                self.ps2_output_format = recommended
-                self.ps2_format_combo.set(recommended)
-                self.log(f"ℹ Using recommended format for {self.ps2_emulator}: {recommended}")
-                self.save_config()
-                if recommended in ['CSO', 'ZSO'] and not self.maxcso_path:
-                    self.log("⚠ maxcso is required for CSO/ZSO output. Set the path above.")
-
-        self.ps2_emulator_combo.bind("<<ComboboxSelected>>", on_ps2_emulator_change)
-
-        # PSP output format selector
-        psp_format_frame = Frame(options_frame, bg=cb_bg)
-        psp_format_frame.pack(fill="x", pady=(4, 4))
-        Label(psp_format_frame, text="↳ PSP output format:", font=self.font_label_bold,
-              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
-        psp_formats = ['CSO', 'ZSO']
-        self.psp_format_combo = ttk.Combobox(psp_format_frame, values=psp_formats,
-                            state="readonly", width=6)
-        if not hasattr(self, 'psp_output_format') or self.psp_output_format not in psp_formats:
-            self.psp_output_format = 'CSO'
+        self.ps2_format_combo.pack(side="left", padx=6)
+        self.ps2_format_combo.bind("<<ComboboxSelected>>", lambda e: (
+            setattr(self, 'ps2_output_format', self.ps2_format_combo.get()),
+            self.save_config(),
+            self.log("⚠ maxcso required for CSO/ZSO") if self.ps2_output_format in ['CSO','ZSO'] and not self.maxcso_path else None
+        ))
+        self.ps2_emulator_combo.bind("<<ComboboxSelected>>", lambda e: self._on_ps2_emu_change())
+        # PSP
+        r3 = Frame(c, bg=COLORS['bg_light'])
+        r3.pack(fill="x", pady=2)
+        Label(r3, text="PSP:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_light']).pack(side="left", padx=(0, 6))
+        self.psp_format_combo = ttk.Combobox(r3, values=['CSO', 'ZSO'], state="readonly", width=6)
         self.psp_format_combo.set(self.psp_output_format)
-        self.psp_format_combo.pack(side="left", padx=8)
+        self.psp_format_combo.pack(side="left")
+        self.psp_format_combo.bind("<<ComboboxSelected>>", lambda e: (
+            setattr(self, 'psp_output_format', self.psp_format_combo.get()),
+            self.save_config(),
+            self.log("⚠ maxcso required for PSP CSO/ZSO") if not self.maxcso_path else None
+        ))
 
-        def on_psp_format_change(event=None):
-            self.psp_output_format = self.psp_format_combo.get()
-            self.save_config()
-            if not self.maxcso_path:
-                self.log("⚠ maxcso is required for PSP CSO/ZSO output. Set the path above.")
+        # --- Collapsible: Archive Handling ---
+        arch_section = CollapsibleFrame(convert_tab, title="📦 Archive Handling",
+            font=self.font_label_bold, fg=COLORS['accent_orange'],
+            bg=COLORS['bg_medium'], collapsed=True)
+        arch_section.pack(fill="x", pady=(0, 2))
+        Checkbutton(arch_section.content, text="Extract compressed files before conversion",
+                   variable=self.extract_compressed, font=cb_font,
+                   fg=COLORS['accent_orange'], bg=COLORS['bg_medium'],
+                   selectcolor=COLORS['bg_dark'],
+                   activebackground=COLORS['bg_medium'],
+                   activeforeground=COLORS['accent_orange']).pack(anchor="w")
+        Checkbutton(arch_section.content, text="⚠ Delete archive files after extraction",
+                   variable=self.delete_archives_after_extract, font=cb_font,
+                   fg=COLORS['accent_red'], bg=COLORS['bg_medium'],
+                   selectcolor=COLORS['bg_dark'],
+                   activebackground=COLORS['bg_medium'],
+                   activeforeground=COLORS['accent_red']).pack(anchor="w")
 
-        self.psp_format_combo.bind("<<ComboboxSelected>>", on_psp_format_change)
+        # --- Action buttons ---
+        btn_frame = Frame(convert_tab, bg=COLORS['bg_dark'])
+        btn_frame.pack(fill="x", pady=(8, 4))
+        self.scan_button = Button(btn_frame, text="🔍 SCAN", command=self.scan_directory,
+            font=self.font_button, bg=COLORS['button_green'], fg=COLORS['bg_dark'],
+            activebackground=COLORS['text_primary'], activeforeground=COLORS['bg_dark'],
+            relief="flat", cursor="hand2", padx=14, pady=5)
+        self.scan_button.pack(side="left", padx=(0, 6))
+        self.convert_button = Button(btn_frame, text="🔥 CONVERT", command=self.start_conversion,
+            font=self.font_button, bg=COLORS['button_blue'], fg="white",
+            activebackground=COLORS['text_secondary'], activeforeground=COLORS['bg_dark'],
+            disabledforeground=COLORS['text_muted'], relief="flat", cursor="hand2",
+            padx=14, pady=5, state="disabled")
+        self.convert_button.pack(side="left", padx=(0, 6))
+        self.stop_button = Button(btn_frame, text="■ STOP", command=self.stop_conversion,
+            font=self.font_button, bg=COLORS['accent_red'], fg="white",
+            activebackground=COLORS['accent_orange'], disabledforeground="white",
+            relief="flat", cursor="hand2", padx=14, pady=5, state="disabled")
+        self.stop_button.pack(side="left", padx=(0, 6))
+        self.move_chd_button = Button(btn_frame, text="📁 MOVE CHD", command=self.move_chd_files_dialog,
+            font=self.font_button, bg=COLORS['accent_purple'], fg="white",
+            activebackground=COLORS['accent_pink'], relief="flat", cursor="hand2", padx=14, pady=5)
+        self.move_chd_button.pack(side="left")
+        # Progress bar
+        self.progress = ttk.Progressbar(convert_tab, mode='determinate',
+                                        style="Retro.Horizontal.TProgressbar")
+        self.progress.pack(fill="x", pady=(8, 4), ipady=3)
 
-        Checkbutton(options_frame, text="📦 Extract compressed files before conversion",
-                variable=self.extract_compressed, font=cb_font,
-                fg=COLORS['accent_orange'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                activebackground=cb_bg, activeforeground=COLORS['accent_orange']).pack(anchor="w")
+        # --- Scan preview (hidden by default) ---
+        self._scan_preview_frame = Frame(convert_tab, bg=COLORS['bg_dark'])
+        self._scan_preview_frame.pack(fill="both", expand=True)
+        self._scan_preview_frame.pack_forget()
 
-        Checkbutton(options_frame, text="⚠ Delete archive files after extraction",
-                variable=self.delete_archives_after_extract, font=cb_font,
-                fg=COLORS['accent_red'], bg=cb_bg, selectcolor=COLORS['bg_dark'],
-                activebackground=cb_bg, activeforeground=COLORS['accent_red']).pack(anchor="w")
-        
-        # Max concurrent conversions slider
-        concurrent_frame = Frame(options_frame, bg=cb_bg)
-        concurrent_frame.pack(fill="x", pady=(8, 4))
-        Label(concurrent_frame, text="⚡ Max concurrent conversions:", font=self.font_label_bold,
-              fg=COLORS['text_secondary'], bg=cb_bg).pack(side="left")
-        self.concurrent_label = Label(concurrent_frame, text=str(self.max_concurrent_conversions), 
-                                       font=self.font_label_bold, fg=COLORS['accent_yellow'], bg=cb_bg, width=3)
+        # === TOOLS TAB ===
+        tools_tab = Frame(self._notebook, bg=COLORS['bg_dark'])
+        self._notebook.add(tools_tab, text="  Tools  ")
+        tools_inner = Frame(tools_tab, bg=COLORS['bg_dark'], padx=10, pady=10)
+        tools_inner.pack(fill="both", expand=True)
+        Label(tools_inner, text="🛠 Utility Tools", font=self.font_heading_md,
+              fg=COLORS['text_primary'], bg=COLORS['bg_dark']).pack(anchor="w", pady=(0, 10))
+        tool_buttons = [
+            ("🗑️  CLEANUP – Remove leftover files", self.cleanup_compressed_dialog, COLORS['accent_orange']),
+            ("✨  CLEAN NAMES – Normalize ROM filenames", self.clean_names_dialog, COLORS['accent_pink']),
+            ("📦  EXTRACT – Bulk extract archives", self.extract_archives_dialog, COLORS['accent_yellow']),
+            ("🔓  3DS DECRYPT – Decrypt 3DS ROMs", self.decrypt_3ds_dialog, COLORS['accent_purple']),
+            ("🌐  ROM BROWSER – Browse Archive.org", self.ia_browser_dialog, COLORS['button_blue']),
+            ("🧬  BIOS – Download BIOS files", self.download_bios_dialog, COLORS['accent_pink']),
+            ("📁  MOVE CHD – Move converted files", self.move_chd_files_dialog, COLORS['accent_purple']),
+        ]
+        for label, cmd, color in tool_buttons:
+            Button(tools_inner, text=label, command=cmd,
+                   font=self.font_button, bg=color, fg="white",
+                   activebackground=COLORS['text_primary'], activeforeground=COLORS['bg_dark'],
+                   relief="flat", cursor="hand2", padx=16, pady=6).pack(fill="x", pady=3)
+
+        # Store references for tools
+        self.cleanup_button = tools_inner.winfo_children()[1]
+        self.clean_names_button = tools_inner.winfo_children()[2]
+        self.extract_archives_button = tools_inner.winfo_children()[3]
+        self.decrypt_3ds_button = tools_inner.winfo_children()[4]
+        self.ia_browser_button = tools_inner.winfo_children()[5]
+        self.bios_download_button = tools_inner.winfo_children()[6]
+
+        # === SETTINGS TAB ===
+        settings_tab = Frame(self._notebook, bg=COLORS['bg_dark'])
+        self._notebook.add(settings_tab, text="  Settings  ")
+        settings_inner = Frame(settings_tab, bg=COLORS['bg_dark'], padx=10, pady=10)
+        settings_inner.pack(fill="both", expand=True)
+
+        # Tool paths section
+        path_section = CollapsibleFrame(settings_inner, title="🔧 Tool Paths",
+            font=self.font_label_bold, fg=COLORS['accent_yellow'],
+            bg=COLORS['bg_medium'], collapsed=False)
+        path_section.pack(fill="x", pady=(0, 8))
+        pc = path_section.content
+        self._build_tool_path_row(pc, "⚙ chdman:", self.chdman_path, self.browse_chdman, "Change")
+        self._build_tool_path_row(pc, "📦 7-Zip:", self.seven_zip_path, self.browse_7zip, "Set")
+        self._build_tool_path_row(pc, "🗜 maxcso:", self.maxcso_path, self.browse_maxcso, "Set")
+        self._build_tool_path_row_with_dl(pc, "💚 extract-xiso:", self.extract_xiso_path, self.browse_extract_xiso, self.download_extract_xiso)
+        self._build_tool_path_row_with_dl(pc, "🔓 NDecrypt:", self.ndecrypt_path, self.browse_ndecrypt, self.download_ndecrypt)
+        self._build_tool_path_row_with_dl(pc, "🎮 PS3 Dumper:", self.ps3_dumper_path, self._browse_ps3_dumper, self.download_ps3_dumper)
+
+        # Concurrency
+        conc_section = CollapsibleFrame(settings_inner, title="⚡ Performance",
+            font=self.font_label_bold, fg=COLORS['button_green'],
+            bg=COLORS['bg_light'], collapsed=False)
+        conc_section.pack(fill="x", pady=(0, 8))
+        cc = conc_section.content
+        cr = Frame(cc, bg=COLORS['bg_light'])
+        cr.pack(fill="x", pady=4)
+        Label(cr, text="Max concurrent conversions:", font=self.font_label_bold,
+              fg=COLORS['text_secondary'], bg=COLORS['bg_light']).pack(side="left")
+        self.concurrent_label = Label(cr, text=str(self.max_concurrent_conversions),
+            font=self.font_label_bold, fg=COLORS['accent_yellow'], bg=COLORS['bg_light'], width=3)
         self.concurrent_label.pack(side="left", padx=(8, 0))
         max_cores = multiprocessing.cpu_count()
-        self.concurrent_slider = ttk.Scale(concurrent_frame, from_=1, to=max_cores, 
-                                            orient="horizontal", length=150,
-                                            command=self.on_concurrent_change)
+        self.concurrent_slider = ttk.Scale(cr, from_=1, to=max_cores,
+            orient="horizontal", length=150, command=self.on_concurrent_change)
         self.concurrent_slider.set(self.max_concurrent_conversions)
         self.concurrent_slider.pack(side="left", padx=(8, 0))
-        Label(concurrent_frame, text=f"(1-{max_cores} cores)", font=cb_font,
-              fg=COLORS['text_muted'], bg=cb_bg).pack(side="left", padx=(8, 0))
-        
-        # Action buttons - Row 1: Primary Actions
-        button_frame_1 = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        button_frame_1.pack(fill="x", pady=(0, 4))
-        
-        self.scan_button = Button(button_frame_1, text="🔍 SCAN", 
-                                 command=self.scan_directory,
-                                 font=self.font_button,
-                                 bg=COLORS['button_green'], fg=COLORS['bg_dark'],
-                                 activebackground=COLORS['text_primary'],
-                                 activeforeground=COLORS['bg_dark'],
-                                 relief="flat", cursor="hand2", padx=12, pady=4)
-        self.scan_button.pack(side="left", padx=(0, 8))
-        
-        self.convert_button = Button(button_frame_1, text="🔥 CONVERT", 
-                                    command=self.start_conversion,
-                                    font=self.font_button,
-                                    bg=COLORS['button_blue'], fg="white",
-                                    activebackground=COLORS['text_secondary'],
-                                    activeforeground=COLORS['bg_dark'],
-                                    disabledforeground=COLORS['text_muted'],
-                                    relief="flat", cursor="hand2", padx=12, pady=4,
-                                    state="disabled")
-        self.convert_button.pack(side="left", padx=(0, 8))
-        
-        self.stop_button = Button(button_frame_1, text="■ STOP", 
-                                 command=self.stop_conversion,
-                                 font=self.font_button,
-                                 bg=COLORS['accent_red'], fg="white",
-                                 activebackground=COLORS['accent_orange'],
-                                 disabledforeground="white",
-                                 relief="flat", cursor="hand2", padx=12, pady=4,
-                                 state="disabled")
-        self.stop_button.pack(side="left", padx=(0, 8))
-        
-        self.move_chd_button = Button(button_frame_1, text="📁 MOVE CHD", 
-                                     command=self.move_chd_files_dialog,
-                                     font=self.font_button,
-                                     bg=COLORS['accent_purple'], fg="white",
-                                     activebackground=COLORS['accent_pink'],
-                                     relief="flat", cursor="hand2", padx=12, pady=4)
-        self.move_chd_button.pack(side="left", padx=(0, 8))
+        Label(cr, text=f"(1-{max_cores} cores)", font=self.font_small,
+              fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack(side="left", padx=(8, 0))
 
-        # Action buttons - Row 2: Tools
-        button_frame_2 = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        button_frame_2.pack(fill="x", pady=(0, 8))
+        # --- Bottom bar (status + metrics) ---
+        self._bottom_bar = Frame(self.main_frame, bg=COLORS['bg_dark'])
+        self._bottom_bar.pack(fill="x", side="bottom")
+        total_cores = multiprocessing.cpu_count()
+        self.status_label = Label(self._bottom_bar,
+            text=f"▶ READY | {self.cpu_cores}/{total_cores} CPU CORES | 1 CORE RESERVED",
+            font=self.font_status, fg=COLORS['text_primary'], bg=COLORS['bg_light'],
+            anchor="w", padx=8, pady=4)
+        self.status_label.pack(fill="x")
+        self.metrics_label = Label(self._bottom_bar, text="◆ METRICS: IDLE ◆", anchor="w",
+            bg=COLORS['bg_medium'], fg=COLORS['accent_yellow'],
+            font=self.font_status, padx=8, pady=4)
+        self.metrics_label.pack(fill="x")
 
-        self.cleanup_button = Button(button_frame_2, text="🗑️ CLEANUP", 
-                                    command=self.cleanup_compressed_dialog,
-                                    font=self.font_button,
-                                    bg=COLORS['accent_orange'], fg="white",
-                                    activebackground=COLORS['accent_red'],
-                                    relief="flat", cursor="hand2", padx=12, pady=4)
-        self.cleanup_button.pack(side="left", padx=(0, 8))
-        
-        self.clean_names_button = Button(button_frame_2, text="✨ CLEAN NAMES", 
-                                        command=self.clean_names_dialog,
-                                        font=self.font_button,
-                                        bg=COLORS['accent_pink'], fg="white",
-                                        activebackground=COLORS['accent_purple'],
-                                        relief="flat", cursor="hand2", padx=12, pady=4)
-        self.clean_names_button.pack(side="left", padx=(0, 8))
-        
-        self.extract_archives_button = Button(button_frame_2, text="📦 EXTRACT", 
-                                             command=self.extract_archives_dialog,
-                                             font=self.font_button,
-                                             bg=COLORS['accent_yellow'], fg=COLORS['bg_dark'],
-                                             activebackground=COLORS['accent_orange'],
-                                             relief="flat", cursor="hand2", padx=12, pady=4)
-        self.extract_archives_button.pack(side="left", padx=(0, 8))
-        
-        self.decrypt_3ds_button = Button(button_frame_2, text="🔓 3DS DECRYPT", 
-                                        command=self.decrypt_3ds_dialog,
-                                        font=self.font_button,
-                                        bg=COLORS['accent_purple'], fg="white",
-                                        activebackground=COLORS['accent_pink'],
-                                        relief="flat", cursor="hand2", padx=12, pady=4)
-        self.decrypt_3ds_button.pack(side="left", padx=(0, 8))
+        # --- Collapsible log panel ---
+        self._log_toggle_btn = Button(self.main_frame, text="▲ Show Log", command=self._toggle_log,
+            font=self.font_small, bg=COLORS['bg_medium'], fg=COLORS['text_muted'],
+            relief="flat", cursor="hand2")
+        self._log_toggle_btn.pack(fill="x", side="bottom", before=self._bottom_bar)
 
-        self.ia_browser_button = Button(button_frame_2, text="🌐 ROM BROWSER", 
-                                        command=self.ia_browser_dialog,
-                                        font=self.font_button,
-                                        bg=COLORS['button_blue'], fg="white",
-                                        activebackground=COLORS['accent_purple'],
-                                        relief="flat", cursor="hand2", padx=12, pady=4)
-        self.ia_browser_button.pack(side="left", padx=(0, 8))
-
-        self.bios_download_button = Button(button_frame_2, text="🧬 BIOS", 
-                                          command=self.download_bios_dialog,
-                                          font=self.font_button,
-                                          bg=COLORS['accent_pink'], fg="white",
-                                          activebackground=COLORS['accent_red'],
-                                          relief="flat", cursor="hand2", padx=12, pady=4)
-        self.bios_download_button.pack(side="left")
-        
-        # Progress bar with retro style
-        progress_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        progress_frame.pack(fill="x", pady=(0, 8))
-        
-        self.progress = ttk.Progressbar(progress_frame, mode='determinate',
-                                        style="Retro.Horizontal.TProgressbar")
-        self.progress.pack(fill="x", ipady=3)
-        
-        # Log area with terminal aesthetic
-        log_label = Label(self.main_frame, text="◄ TERMINAL OUTPUT ►", anchor="w",
-                         font=self.font_label_bold,
-                         fg=COLORS['text_secondary'], bg=COLORS['bg_dark'])
-        log_label.pack(fill="x", pady=(0, 4))
-        
-        log_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
-        log_frame.pack(fill="both", expand=True)
-        
-        scrollbar = Scrollbar(log_frame, bg=COLORS['bg_light'],
-                             troughcolor=COLORS['bg_dark'],
-                             activebackground=COLORS['text_primary'])
-        scrollbar.pack(side="right", fill="y")
-        
-        self.log_text = Text(log_frame, wrap="word", yscrollcommand=scrollbar.set,
-                            height=1000, font=self.font_mono,
+        self._log_frame = Frame(self.main_frame, bg=COLORS['bg_dark'])
+        log_scroll = Scrollbar(self._log_frame, bg=COLORS['bg_light'],
+                               troughcolor=COLORS['bg_dark'],
+                               activebackground=COLORS['text_primary'])
+        log_scroll.pack(side="right", fill="y")
+        self.log_text = Text(self._log_frame, wrap="word", yscrollcommand=log_scroll.set,
+                            height=10, font=self.font_mono,
                             bg=COLORS['bg_medium'], fg=COLORS['text_primary'],
                             insertbackground=COLORS['text_primary'],
                             selectbackground=COLORS['accent_purple'],
-                            selectforeground="white",
-                            relief="flat", padx=8, pady=8)
+                            selectforeground="white", relief="flat", padx=8, pady=8)
         self.log_text.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.log_text.yview)
-        
-        # Status bar
-        total_cores = multiprocessing.cpu_count()
-        self.status_label = Label(self.main_frame, 
-                                 text=f"▶ READY | {self.cpu_cores}/{total_cores} CPU CORES | 1 CORE RESERVED",
-                                 font=self.font_status,
-                                 fg=COLORS['text_primary'], bg=COLORS['bg_light'],
-                                 anchor="w", padx=8, pady=4)
-        self.status_label.pack(fill="x", pady=(8, 4))
+        log_scroll.config(command=self.log_text.yview)
+        # Log starts hidden
 
-        # Metrics label with retro styling
-        self.metrics_label = Label(self.main_frame, text="◆ METRICS: IDLE ◆", anchor="w", 
-                                   bg=COLORS['bg_medium'], fg=COLORS['accent_yellow'],
-                                   font=self.font_status, padx=8, pady=4)
-        self.metrics_label.pack(fill="x")
+        # --- Trace config save on option changes ---
+        for var in [self.delete_originals, self.move_to_backup, self.recursive,
+                    self.process_ps1_cues, self.process_ps2_cues, self.process_ps2_isos,
+                    self.process_psp_isos, self.process_ps3_isos, self.process_xbox_isos,
+                    self.process_nes_roms, self.process_snes_roms, self.process_n64_roms,
+                    self.extract_compressed, self.delete_archives_after_extract]:
+            var.trace_add('write', lambda *args: self.save_config())
 
         if not PSUTIL_AVAILABLE:
             self.log("ℹ Resource metrics disabled (psutil not installed - this is optional)")
-        
-        # Add trace callbacks to save config when options change
-        self.delete_originals.trace_add('write', lambda *args: self.save_config())
-        self.move_to_backup.trace_add('write', lambda *args: self.save_config())
-        self.recursive.trace_add('write', lambda *args: self.save_config())
-        self.process_ps1_cues.trace_add('write', lambda *args: self.save_config())
-        self.process_ps2_cues.trace_add('write', lambda *args: self.save_config())
-        self.process_ps2_isos.trace_add('write', lambda *args: self.save_config())
-        self.process_psp_isos.trace_add('write', lambda *args: self.save_config())
-        self.extract_compressed.trace_add('write', lambda *args: self.save_config())
-        self.delete_archives_after_extract.trace_add('write', lambda *args: self.save_config())
-        
-        # Start log queue processor
+
         self.process_log_queue()
-        # Apply theme after UI construction
         self.apply_theme()
+
+        # Show quick-start wizard on first run
+        self.master.after(500, lambda: self._show_quick_start() if self._is_first_run() else None)
+
+    def _build_tool_path_row(self, parent, label, path, browse_cmd, btn_text):
+        """Build a tool path row for the settings tab."""
+        row = Frame(parent, bg=COLORS['bg_medium'], pady=2)
+        row.pack(fill="x", pady=1)
+        Label(row, text=label, font=self.font_label_bold,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_medium'], width=14, anchor="w").pack(side="left")
+        label_widget = Label(row, text=path or "Not set", font=self.font_small,
+            fg=COLORS['text_secondary'] if path else COLORS['text_muted'],
+            bg=COLORS['bg_medium'], anchor="w")
+        label_widget.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        btn = Button(row, text=f"[ {btn_text} ]", command=browse_cmd,
+            font=self.font_small, bg=COLORS['button_blue'], fg="white",
+            activebackground=COLORS['accent_purple'], relief="flat", cursor="hand2")
+        btn.pack(side="left")
+        # Store label references
+        if "chdman" in label:
+            self.chdman_label = label_widget
+        elif "7-Zip" in label:
+            self.seven_zip_label = label_widget
+        elif "maxcso" in label:
+            self.maxcso_label = label_widget
+
+    def _build_tool_path_row_with_dl(self, parent, label, path, browse_cmd, download_cmd):
+        """Build a tool path row with Set + Download buttons."""
+        row = Frame(parent, bg=COLORS['bg_medium'], pady=2)
+        row.pack(fill="x", pady=1)
+        Label(row, text=label, font=self.font_label_bold,
+              fg=COLORS['accent_yellow'], bg=COLORS['bg_medium'], width=14, anchor="w").pack(side="left")
+        label_widget = Label(row, text=path or "Not set", font=self.font_small,
+            fg=COLORS['text_secondary'] if path else COLORS['text_muted'],
+            bg=COLORS['bg_medium'], anchor="w")
+        label_widget.pack(side="left", fill="x", expand=True, padx=(4, 8))
+        Button(row, text="[ Set ]", command=browse_cmd,
+            font=self.font_small, bg=COLORS['bg_light'], fg=COLORS['text_secondary'],
+            relief="flat", cursor="hand2").pack(side="left", padx=2)
+        Button(row, text="[ Download ]", command=download_cmd,
+            font=self.font_small, bg=COLORS['accent_purple'], fg="white",
+            relief="flat", cursor="hand2").pack(side="left", padx=2)
+        # Store label references
+        if "NDecrypt" in label:
+            self.ndecrypt_label = label_widget
+        elif "PS3" in label:
+            self.ps3_dumper_label = label_widget
+
+    def _browse_ps3_dumper(self):
+        filetypes = [("Executable files", "*.exe"), ("All files", "*.*")]
+        selected = filedialog.askopenfilename(title="Select ps3-disc-dumper executable", filetypes=filetypes)
+        if selected:
+            self.ps3_dumper_path = selected
+            self.ps3_dumper_label.config(text=self.ps3_dumper_path, fg=COLORS['text_secondary'])
+            self._update_tool_status()
+            self.save_config()
+
+    def _on_ps2_emu_change(self):
+        self.ps2_emulator = self.ps2_emulator_combo.get()
+        recommended = PS2_EMULATOR_RECOMMENDATIONS.get(self.ps2_emulator, 'CHD')
+        if recommended in PS2_OUTPUT_FORMATS:
+            self.ps2_output_format = recommended
+            self.ps2_format_combo.set(recommended)
+            self.log(f"ℹ Using recommended format for {self.ps2_emulator}: {recommended}")
+            self.save_config()
+
+    def _build_tool_status_text(self):
+        """Build compact tool status string."""
+        parts = []
+        parts.append(f"⚙ chdman: {'✓' if self.chdman_path else '✗'}")
+        parts.append(f"7z: {'✓' if self.seven_zip_path else '✗'}")
+        parts.append(f"maxcso: {'✓' if self.maxcso_path else '✗'}")
+        parts.append(f"xiso: {'✓' if self.extract_xiso_path else '✗'}")
+        parts.append(f"NDecrypt: {'✓' if self.ndecrypt_path else '✗'}")
+        parts.append(f"PS3: {'✓' if self.ps3_dumper_path else '✗'}")
+        return " | ".join(parts)
+
+    def _update_tool_status(self):
+        """Update the compact tool status bar."""
+        if hasattr(self, '_tool_status_label'):
+            self._tool_status_label.config(text=self._build_tool_status_text())
     
     def browse_directory(self):
         """Open directory browser"""
@@ -4856,27 +5428,29 @@ obtained ROM files.
         self.log_queue.put(message)
     
     def process_log_queue(self):
-        """Process queued log messages from threads - batched for performance"""
+        """Process queued log messages from threads - batched for performance."""
         try:
             messages = []
-            # Batch up to 20 messages at once to reduce UI updates
             for _ in range(20):
                 try:
                     message = self.log_queue.get_nowait()
                     messages.append(message)
                 except:
                     break
-            
+
             if messages:
-                # Insert all messages at once
+                # Auto-expand log panel during conversion or when new messages arrive
+                if not self.log_visible and (self.is_converting or len(messages) >= 3):
+                    self._toggle_log()
                 self.log_text.insert("end", "\n".join(messages) + "\n")
                 self.log_text.see("end")
-                # Force UI update only once per batch
                 self.log_text.update_idletasks()
+                # Periodically refresh tool status
+                if hasattr(self, '_tool_status_label'):
+                    self._tool_status_label.config(text=self._build_tool_status_text())
         except:
             pass
         finally:
-            # Check less frequently when idle (200ms), more often when busy (50ms)
             interval = 50 if self.is_converting else 200
             self.master.after(interval, self.process_log_queue)
     
