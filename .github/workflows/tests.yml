@@ -1,0 +1,68 @@
+name: Tests and Quality Checks
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  tests:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest pytest-cov mypy black flake8
+    
+    - name: Run unit tests
+      run: pytest test_*.py -v --tb=short --cov=. --cov-report=xml
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      with:
+        file: ./coverage.xml
+        flags: unittests
+        name: codecov-umbrella
+    
+    - name: Run type checking with mypy
+      run: mypy logging_setup.py logging_integration.py exceptions.py --ignore-missing-imports
+      continue-on-error: true
+    
+    - name: Check code formatting with black
+      run: black --check logging_setup.py logging_integration.py exceptions.py conftest.py
+      continue-on-error: true
+    
+    - name: Lint with flake8
+      run: |
+        flake8 logging_setup.py logging_integration.py exceptions.py \
+          --count --select=E9,F63,F7,F82 --show-source --statistics
+      continue-on-error: true
+
+  test-summary:
+    needs: tests
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Check test results
+      run: |
+        if [ "${{ needs.tests.result }}" = "failure" ]; then
+          echo "Tests failed. Please check the logs above."
+          exit 1
+        fi
+        echo "All tests passed successfully! ✅"

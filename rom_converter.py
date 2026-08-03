@@ -46,6 +46,147 @@ try:
 except ImportError:
     DOCX_AVAILABLE = False
 
+# Phase 3: Robustness improvements
+try:
+    from retry_integration import make_download_retryable, make_extraction_retryable, make_conversion_retryable
+    RETRY_INTEGRATION_AVAILABLE = True
+except ImportError:
+    RETRY_INTEGRATION_AVAILABLE = False
+
+try:
+    from logging_queue_bridge import setup_queue_logging_bridge
+    LOGGING_QUEUE_BRIDGE_AVAILABLE = True
+except ImportError:
+    LOGGING_QUEUE_BRIDGE_AVAILABLE = False
+
+# Phase 3 Week 4: Service modularization
+try:
+    from converter_factory import ConverterFactory
+    CONVERTER_FACTORY_AVAILABLE = True
+except ImportError:
+    CONVERTER_FACTORY_AVAILABLE = False
+
+try:
+    from extraction_registry import ExtractionRegistry
+    EXTRACTION_REGISTRY_AVAILABLE = True
+except ImportError:
+    EXTRACTION_REGISTRY_AVAILABLE = False
+
+# Phase 4 Week 1: Tool and config management
+try:
+    from tool_registry import ToolRegistry, create_default_tool_registry
+    TOOL_REGISTRY_AVAILABLE = True
+except ImportError:
+    TOOL_REGISTRY_AVAILABLE = False
+
+try:
+    from config_adapter import ROMConverterConfigAdapter
+    CONFIG_ADAPTER_AVAILABLE = True
+except ImportError:
+    CONFIG_ADAPTER_AVAILABLE = False
+
+# Phase 4 Week 3: Performance optimization
+try:
+    from performance_optimizer import PerformanceOptimizer, create_performance_optimizer
+    PERFORMANCE_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    PERFORMANCE_OPTIMIZER_AVAILABLE = False
+
+# Phase 4 Week 4: Streaming & error handling
+try:
+    from streaming_converter import StreamingConverter, create_streaming_converter
+    STREAMING_CONVERTER_AVAILABLE = True
+except ImportError:
+    STREAMING_CONVERTER_AVAILABLE = False
+
+try:
+    from conversion_error_handler import ConversionErrorHandler, create_error_handler
+    ERROR_HANDLER_AVAILABLE = True
+except ImportError:
+    ERROR_HANDLER_AVAILABLE = False
+
+# Phase 4 Week 5: Metrics persistence & performance analysis
+try:
+    from metrics_store import MetricsStore, create_metrics_store
+    METRICS_STORE_AVAILABLE = True
+except ImportError:
+    METRICS_STORE_AVAILABLE = False
+
+try:
+    from performance_analyzer import PerformanceAnalyzer, create_performance_analyzer
+    PERFORMANCE_ANALYZER_AVAILABLE = True
+except ImportError:
+    PERFORMANCE_ANALYZER_AVAILABLE = False
+
+# Phase 4 Week 6: Performance status panel (UI widget — import deferred to setup_ui)
+PERFORMANCE_PANEL_AVAILABLE = False
+try:
+    import performance_status_panel as _psp_mod  # noqa: F401
+    PERFORMANCE_PANEL_AVAILABLE = True
+except ImportError:
+    pass
+
+# Phase 5: UI track
+try:
+    from batch_progress_panel import BatchProgressPanel, FileStatus, create_batch_progress_panel
+    BATCH_PROGRESS_AVAILABLE = True
+except ImportError:
+    BATCH_PROGRESS_AVAILABLE = False
+
+try:
+    from performance_settings_panel import PerformanceSettingsPanel, create_performance_settings_panel
+    PERF_SETTINGS_PANEL_AVAILABLE = True
+except ImportError:
+    PERF_SETTINGS_PANEL_AVAILABLE = False
+
+try:
+    from session_history_panel import SessionHistoryPanel, create_session_history_panel
+    SESSION_HISTORY_PANEL_AVAILABLE = True
+except ImportError:
+    SESSION_HISTORY_PANEL_AVAILABLE = False
+
+# Phase 5: Format track
+try:
+    from chd_verifier import CHDVerifier, create_chd_verifier
+    CHD_VERIFIER_AVAILABLE = True
+except ImportError:
+    CHD_VERIFIER_AVAILABLE = False
+
+try:
+    from cue_parser import CueParser, CueDisc, DiscSystem, parse_cue
+    CUE_PARSER_AVAILABLE = True
+except ImportError:
+    CUE_PARSER_AVAILABLE = False
+
+try:
+    from gamecube_converter import GameCubeConverter, detect_disc_type as gcn_detect_disc_type, is_gamecube_or_wii, create_gamecube_converter
+    GAMECUBE_CONVERTER_AVAILABLE = True
+except ImportError:
+    GAMECUBE_CONVERTER_AVAILABLE = False
+
+try:
+    from dat_matcher import DatMatcher, MatchStatus, create_dat_matcher
+    DAT_MATCHER_AVAILABLE = True
+except ImportError:
+    DAT_MATCHER_AVAILABLE = False
+
+# Phase 5 Week 2 - Queue Management (drag-drop)
+try:
+    from dragdrop_queue_panel import DragDropQueuePanel, create_dragdrop_queue_panel, TKDND_AVAILABLE as DRAGDROP_AVAILABLE
+    DRAGDROP_PANEL_AVAILABLE = True
+except ImportError:
+    DRAGDROP_PANEL_AVAILABLE = False
+
+# Phase 4 Week 1 - Config Manager UI
+try:
+    from config_manager_ui import (
+        ToolStatusDisplay, ConfigValidationDisplay, ConfigExportImport,
+        create_tool_status_display, create_config_validation_display, create_config_export_import,
+    )
+    CONFIG_MANAGER_UI_AVAILABLE = True
+except ImportError:
+    CONFIG_MANAGER_UI_AVAILABLE = False
+
 # MAME download configuration
 MAME_RELEASE_URL = "https://www.mamedev.org/release.html"
 MAME_GITHUB_RELEASES_API = "https://api.github.com/repos/mamedev/mame/releases/latest"
@@ -402,6 +543,149 @@ class ROMConverter:
         self.completed_files = set()  # Track completed conversions
         self.current_batch_id = None
         
+        # Phase 4 Week 2: Initialize ToolRegistry for centralized tool management
+        self.tool_registry = None
+        self.config_adapter = None
+        
+        if TOOL_REGISTRY_AVAILABLE:
+            try:
+                # Use print for now since log method isn't set up yet
+                self.tool_registry = create_default_tool_registry(log_callback=print)
+                self.tool_registry.check_all()
+                print("✅ ToolRegistry initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize ToolRegistry: {e}")
+                self.tool_registry = None
+        else:
+            print("⚠️  ToolRegistry not available - using fallback tool detection")
+        
+        # Phase 4 Week 2: Initialize ConfigAdapter for centralized config management
+        if CONFIG_ADAPTER_AVAILABLE:
+            try:
+                self.config_adapter = ROMConverterConfigAdapter(
+                    self,
+                    config_file=self.config_file,
+                    log_callback=print
+                )
+                self.config_adapter.init_config_manager()
+                print("✅ ConfigAdapter initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize ConfigAdapter: {e}")
+                self.config_adapter = None
+        else:
+            print("⚠️  ConfigAdapter not available - using fallback config handling")
+        
+        # Phase 4 Week 3: Initialize PerformanceOptimizer for parallel conversions
+        self.performance_optimizer = None
+        if PERFORMANCE_OPTIMIZER_AVAILABLE:
+            try:
+                self.performance_optimizer = create_performance_optimizer(
+                    log_callback=print
+                )
+                print("✅ PerformanceOptimizer initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize PerformanceOptimizer: {e}")
+                self.performance_optimizer = None
+        else:
+            print("⚠️  PerformanceOptimizer not available - using single-threaded conversion")
+
+        # Phase 4 Week 4: Initialize StreamingConverter
+        self.streaming_converter = None
+        if STREAMING_CONVERTER_AVAILABLE:
+            try:
+                self.streaming_converter = create_streaming_converter(log_callback=print)
+                print("✅ StreamingConverter initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize StreamingConverter: {e}")
+        else:
+            print("⚠️  StreamingConverter not available - using standard I/O")
+
+        # Phase 4 Week 4: Initialize ConversionErrorHandler
+        self.error_handler = None
+        if ERROR_HANDLER_AVAILABLE:
+            try:
+                self.error_handler = create_error_handler(log_callback=print)
+                print("✅ ConversionErrorHandler initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize ConversionErrorHandler: {e}")
+        else:
+            print("⚠️  ConversionErrorHandler not available - using basic error handling")
+
+        # Phase 4 Week 5: Initialize MetricsStore and PerformanceAnalyzer
+        self.metrics_store = None
+        if METRICS_STORE_AVAILABLE:
+            try:
+                self.metrics_store = create_metrics_store(log_callback=print)
+                print("✅ MetricsStore initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize MetricsStore: {e}")
+        else:
+            print("⚠️  MetricsStore not available - metrics will not be persisted")
+
+        self.performance_analyzer = None
+        if PERFORMANCE_ANALYZER_AVAILABLE and self.metrics_store is not None:
+            try:
+                self.performance_analyzer = create_performance_analyzer(
+                    store=self.metrics_store, log_callback=print
+                )
+                print("✅ PerformanceAnalyzer initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize PerformanceAnalyzer: {e}")
+        elif PERFORMANCE_ANALYZER_AVAILABLE:
+            try:
+                self.performance_analyzer = create_performance_analyzer(log_callback=print)
+                print("✅ PerformanceAnalyzer initialized (in-memory store)")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize PerformanceAnalyzer: {e}")
+
+        # Phase 5: Initialize CHDVerifier (format track)
+        self.chd_verifier = None
+        if CHD_VERIFIER_AVAILABLE:
+            try:
+                self.chd_verifier = create_chd_verifier(
+                    chdman_path=getattr(self, "chdman_path", None),
+                    log_callback=print,
+                )
+                print("✅ CHDVerifier initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize CHDVerifier: {e}")
+        else:
+            print("⚠️  CHDVerifier not available - CHD output will not be verified")
+
+        # Phase 5: CueParser available (stateless, no init needed)
+        self._cue_parser_available = CUE_PARSER_AVAILABLE
+
+        # Phase 5 Week 2: GameCube converter
+        self.gamecube_converter = None
+        if GAMECUBE_CONVERTER_AVAILABLE:
+            try:
+                self.gamecube_converter = create_gamecube_converter(log_callback=print)
+                print("✅ GameCubeConverter initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize GameCubeConverter: {e}")
+
+        # Phase 5 Week 2: DAT matcher
+        self.dat_matcher = None
+        if DAT_MATCHER_AVAILABLE:
+            try:
+                self.dat_matcher = create_dat_matcher(log_callback=print)
+                print("✅ DatMatcher initialized successfully")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize DatMatcher: {e}")
+
+        # Phase 5 Week 2: UI panels (created in setup_ui)
+        self._perf_settings_panel = None
+        self._session_history_panel = None
+        self._dragdrop_queue_panel = None
+
+        # Phase 4 Week 1: Config Manager UI panels (created in setup_ui)
+        self._tool_status_display = None
+        self._config_validation_display = None
+        self._config_export_import = None
+
+        # Phase 5: BatchProgressPanel created in setup_ui
+        self._batch_progress_panel = None
+
         # Load saved configuration
         self.load_config()
         self.load_progress()
@@ -480,7 +764,107 @@ class ROMConverter:
             # chdman found - check for updates
             self.check_for_chdman_update()
         
+        # Phase 3 Week 4: Initialize service factories
+        self._init_service_factories()
+        
         self.setup_ui()
+        
+        # Phase 3: Setup logging queue bridge for robustness
+        self._setup_retry_wrappers()
+
+    def _setup_retry_wrappers(self):
+        """Setup retry logic wrappers for critical methods.
+        
+        This wraps download, extraction, and conversion methods with exponential backoff
+        to handle transient errors (timeouts, network issues, temporary resource constraints).
+        """
+        if not RETRY_INTEGRATION_AVAILABLE:
+            self.log("⚠️  Retry integration not available - skipping robustness setup")
+            return
+        
+        # Wrap download methods with 5 attempts, 2s base delay, 120s max
+        self.download_mame_tools = make_download_retryable(
+            self.download_mame_tools, 
+            name="download_mame_tools",
+            logger=None  # Will use built-in logger via self.log
+        )
+        self.download_7zip = make_download_retryable(
+            self.download_7zip,
+            name="download_7zip",
+            logger=None
+        )
+        self.download_maxcso = make_download_retryable(
+            self.download_maxcso,
+            name="download_maxcso",
+            logger=None
+        )
+        self.download_ndecrypt = make_download_retryable(
+            self.download_ndecrypt,
+            name="download_ndecrypt",
+            logger=None
+        )
+        self.download_ps3_dumper = make_download_retryable(
+            self.download_ps3_dumper,
+            name="download_ps3_dumper",
+            logger=None
+        )
+        self.download_auto_decrypt_ps3 = make_download_retryable(
+            self.download_auto_decrypt_ps3,
+            name="download_auto_decrypt_ps3",
+            logger=None
+        )
+        self.download_extract_xiso = make_download_retryable(
+            self.download_extract_xiso,
+            name="download_extract_xiso",
+            logger=None
+        )
+        
+        # Wrap extraction methods with 3 attempts, 1s base delay, 60s max
+        self.extract_archive = make_extraction_retryable(
+            self.extract_archive,
+            name="extract_archive",
+            logger=None
+        )
+        self.extract_xbox_iso = make_extraction_retryable(
+            self.extract_xbox_iso,
+            name="extract_xbox_iso",
+            logger=None
+        )
+        
+        # Wrap conversion methods with 2 attempts, 5s base delay, 120s max
+        self.convert_game = make_conversion_retryable(
+            self.convert_game,
+            name="convert_game",
+            logger=None
+        )
+        
+        self.log("✅ Retry logic wrappers installed - robustness enabled")
+
+    def _init_service_factories(self):
+        """Initialize ConverterFactory and ExtractionRegistry for modularized services"""
+        if not CONVERTER_FACTORY_AVAILABLE:
+            self.log("⚠️  ConverterFactory not available - using fallback convert_game")
+            self.converter_factory = None
+        else:
+            self.converter_factory = ConverterFactory(
+                chdman_path=Path(self.chdman_path) if self.chdman_path else None,
+                maxcso_path=Path(self.maxcso_path) if self.maxcso_path else None,
+                ps3_dumper_path=Path(self.ps3_dumper_path) if self.ps3_dumper_path else None,
+                extract_xiso_path=Path(self.extract_xiso_path) if self.extract_xiso_path else None,
+                ndecrypt_path=Path(self.ndecrypt_path) if self.ndecrypt_path else None,
+                log_callback=self.log
+            )
+            self.log("✅ ConverterFactory initialized")
+        
+        if not EXTRACTION_REGISTRY_AVAILABLE:
+            self.log("⚠️  ExtractionRegistry not available - using fallback extract_archive")
+            self.extraction_registry = None
+        else:
+            self.extraction_registry = ExtractionRegistry(
+                seven_zip_path=Path(self.seven_zip_path) if self.seven_zip_path else None,
+                log_callback=self.log
+            )
+            self.log("✅ ExtractionRegistry initialized")
 
     def get_build_timestamp(self):
         """Return build timestamp for About dialog."""
@@ -4360,7 +4744,18 @@ obtained ROM files.
         on_complete()
 
     def save_config(self):
-        """Save configuration to JSON file"""
+        """Save configuration to JSON file or ConfigAdapter"""
+        # Phase 4 Week 2: Sync to ConfigAdapter before saving
+        if self.config_adapter:
+            try:
+                self.config_adapter.sync_from_rom_converter()
+                if self.config_adapter.save():
+                    self.log("✅ Configuration saved via ConfigAdapter")
+                    return
+            except Exception as e:
+                self.log(f"⚠️  ConfigAdapter save failed: {e}, falling back to direct save")
+        
+        # Fallback: Traditional JSON saving
         try:
             config = {
                 'source_dir': self._make_portable_path(self.source_dir),
@@ -4410,7 +4805,18 @@ obtained ROM files.
             pass
     
     def load_config(self):
-        """Load configuration from JSON file"""
+        """Load configuration from JSON file or ConfigAdapter"""
+        # Phase 4 Week 2: Try loading via ConfigAdapter first if available
+        if self.config_adapter:
+            try:
+                if self.config_adapter.load():
+                    self.config_adapter.sync_to_rom_converter()
+                    self.log("✅ Configuration loaded via ConfigAdapter")
+                    return
+            except Exception as e:
+                self.log(f"⚠️  ConfigAdapter load failed: {e}, falling back to direct load")
+        
+        # Fallback: Traditional JSON loading
         try:
             if self.config_file.exists():
                 with open(self.config_file, 'r') as f:
@@ -5208,6 +5614,20 @@ obtained ROM files.
                                         style="Retro.Horizontal.TProgressbar")
         self.progress.pack(fill="x", pady=(8, 4), ipady=3)
 
+        # Phase 5: BatchProgressPanel — per-file queue with ETA and cancel
+        if BATCH_PROGRESS_AVAILABLE:
+            try:
+                self._batch_progress_panel = create_batch_progress_panel(
+                    convert_tab,
+                    log_callback=self.log,
+                    on_pause_resume=self._on_batch_pause_resume,
+                    on_cancel_file=self._on_cancel_file,
+                )
+                self._batch_progress_panel.pack(fill="both", expand=True, pady=(0, 4))
+            except Exception as e:
+                print(f"⚠️  BatchProgressPanel init failed: {e}")
+                self._batch_progress_panel = None
+
         # --- Scan preview (hidden by default) ---
         self._scan_preview_frame = Frame(convert_tab, bg=COLORS['bg_dark'])
         self._scan_preview_frame.pack(fill="both", expand=True)
@@ -5283,6 +5703,39 @@ obtained ROM files.
         Label(cr, text=f"(1-{max_cores} cores)", font=self.font_small,
               fg=COLORS['text_muted'], bg=COLORS['bg_light']).pack(side="left", padx=(8, 0))
 
+        # Phase 4 Week 1: Tool Status Display
+        if CONFIG_MANAGER_UI_AVAILABLE:
+            try:
+                self._tool_status_display = create_tool_status_display(
+                    settings_inner,
+                    tool_registry=getattr(self, "tool_registry", None),
+                )
+                self._tool_status_display.pack(fill="x", pady=(0, 8))
+            except Exception as exc:
+                print(f"⚠️  ToolStatusDisplay failed: {exc}")
+
+        # Phase 4 Week 1: Config Validation Display
+        if CONFIG_MANAGER_UI_AVAILABLE:
+            try:
+                self._config_validation_display = create_config_validation_display(
+                    settings_inner,
+                    config_adapter=getattr(self, "config_adapter", None),
+                )
+                self._config_validation_display.pack(fill="x", pady=(0, 8))
+            except Exception as exc:
+                print(f"⚠️  ConfigValidationDisplay failed: {exc}")
+
+        # Phase 4 Week 1: Config Export/Import
+        if CONFIG_MANAGER_UI_AVAILABLE:
+            try:
+                self._config_export_import = create_config_export_import(
+                    settings_inner,
+                    config_adapter=getattr(self, "config_adapter", None),
+                )
+                self._config_export_import.pack(fill="x", pady=(0, 8))
+            except Exception as exc:
+                print(f"⚠️  ConfigExportImport failed: {exc}")
+
         # --- Bottom bar (status + metrics) ---
         self._bottom_bar = Frame(self.main_frame, bg=COLORS['bg_dark'])
         self._bottom_bar.pack(fill="x", side="bottom")
@@ -5329,11 +5782,184 @@ obtained ROM files.
         if not PSUTIL_AVAILABLE:
             self.log("ℹ Resource metrics disabled (psutil not installed - this is optional)")
 
+        # === PERFORMANCE TAB (Phase 4 Week 6) ===
+        self._setup_performance_tab()
+
         self.process_log_queue()
         self.apply_theme()
 
         # Show quick-start wizard on first run
         self.master.after(500, lambda: self._show_quick_start() if self._is_first_run() else None)
+
+    def _on_perf_settings_apply(self, settings: dict) -> None:
+        """Called when the PerformanceSettingsPanel Apply button is clicked."""
+        self.log(f"⚙ Performance settings applied: {settings}")
+        # Update optimizer if available
+        optimizer = getattr(self, "performance_optimizer", None)
+        if optimizer:
+            try:
+                if "max_workers" in settings:
+                    optimizer.set_max_workers(settings["max_workers"])
+            except Exception:
+                pass
+
+    def _on_batch_pause_resume(self, paused: bool) -> None:
+        """Called by BatchProgressPanel when user clicks Pause/Resume."""
+        self.log("⏸ Batch paused by user" if paused else "▶ Batch resumed by user")
+        # Underlying pause flag checked in conversion loop
+        self._batch_paused = paused
+
+    def _on_cancel_file(self, file_id: str) -> None:
+        """Called by BatchProgressPanel when user cancels a specific file."""
+        self.log(f"🚫 Cancel requested for: {file_id}")
+        if not hasattr(self, "_cancelled_files"):
+            self._cancelled_files = set()
+        self._cancelled_files.add(file_id)
+
+    def _setup_performance_tab(self):
+        """Add the Performance tab to the notebook (Phase 4 Week 6)."""
+        try:
+            from performance_status_panel import create_performance_panel
+        except ImportError:
+            return  # Module not available — skip silently
+
+        perf_tab = Frame(self._notebook, bg=COLORS['bg_dark'])
+        self._notebook.add(perf_tab, text="  ⚡ Performance  ")
+
+        inner = Frame(perf_tab, bg=COLORS['bg_dark'], padx=10, pady=10)
+        inner.pack(fill="both", expand=True)
+
+        Label(
+            inner,
+            text="⚡ Performance Monitor",
+            font=self.font_heading_md,
+            fg=COLORS['text_primary'],
+            bg=COLORS['bg_dark'],
+        ).pack(anchor="w", pady=(0, 8))
+
+        # Live status panel
+        self._perf_panel = create_performance_panel(
+            inner,
+            optimizer=getattr(self, "performance_optimizer", None),
+            error_handler=getattr(self, "error_handler", None),
+            analyzer=getattr(self, "performance_analyzer", None),
+            log_callback=self.log,
+        )
+        self._perf_panel.pack(fill="x", pady=(0, 8))
+        self._perf_panel.start_updates()
+
+        # Session summary section
+        Label(
+            inner,
+            text="Session Metrics",
+            font=self.font_label_bold,
+            fg=COLORS['accent_yellow'],
+            bg=COLORS['bg_dark'],
+        ).pack(anchor="w", pady=(8, 4))
+
+        self._session_summary_text = Text(
+            inner,
+            height=8,
+            bg=COLORS['bg_medium'],
+            fg=COLORS['text_secondary'],
+            font=("Courier", 9),
+            relief="flat",
+            state="disabled",
+        )
+        self._session_summary_text.pack(fill="x")
+
+        # Refresh button
+        Frame(inner, bg=COLORS['bg_dark'], height=4).pack()
+        Button(
+            inner,
+            text="🔄 Refresh Session Summary",
+            command=self._refresh_session_summary,
+            font=self.font_button,
+            bg=COLORS['button_blue'],
+            fg="white",
+            relief="flat",
+            cursor="hand2",
+            padx=12,
+            pady=4,
+        ).pack(anchor="w")
+
+        # Performance settings panel (Phase 5 Week 2)
+        if PERF_SETTINGS_PANEL_AVAILABLE:
+            try:
+                self._perf_settings_panel = create_performance_settings_panel(
+                    inner,
+                    config_adapter=getattr(self, "config_adapter", None),
+                    on_apply=self._on_perf_settings_apply,
+                )
+                self._perf_settings_panel.pack(fill="x", pady=(8, 0))
+            except Exception as exc:
+                print(f"⚠️  PerformanceSettingsPanel failed: {exc}")
+
+        # History tab (Phase 5 Week 2)
+        if SESSION_HISTORY_PANEL_AVAILABLE:
+            try:
+                history_tab = Frame(self._notebook, bg=COLORS['bg_dark'])
+                self._notebook.add(history_tab, text="  📜 History  ")
+                self._session_history_panel = create_session_history_panel(
+                    history_tab,
+                    metrics_store=getattr(self, "metrics_store", None),
+                )
+                self._session_history_panel.pack(fill="both", expand=True, padx=6, pady=6)
+            except Exception as exc:
+                print(f"⚠️  SessionHistoryPanel failed: {exc}")
+
+    def _refresh_session_summary(self):
+        """Populate the session summary text box from MetricsStore."""
+        store = getattr(self, "metrics_store", None)
+        if not store:
+            self._set_session_summary("MetricsStore not available.")
+            return
+
+        try:
+            stats = store.get_stats()
+            total = stats.get("total") or 0
+            if total == 0:
+                self._set_session_summary("No conversions recorded yet.")
+                return
+
+            successful = stats.get("successful") or 0
+            failed     = stats.get("failed") or 0
+            rate       = f"{successful / total * 100:.1f}%" if total else "N/A"
+            avg_tp     = stats.get("avg_throughput_mbps") or 0
+            max_dur    = stats.get("max_duration") or 0
+            avg_dur    = stats.get("avg_duration") or 0
+            total_in   = (stats.get("total_input_bytes") or 0) / 1024 / 1024 / 1024
+
+            lines = [
+                f"All-time stats ({total} conversions)",
+                f"  Success rate : {rate}  ({successful} ok / {failed} failed)",
+                f"  Avg throughput : {avg_tp:.2f} MB/s",
+                f"  Avg duration   : {avg_dur:.1f}s",
+                f"  Max duration   : {max_dur:.1f}s",
+                f"  Total input    : {total_in:.2f} GB processed",
+            ]
+            tool_stats = store.get_tool_stats()
+            if tool_stats:
+                lines.append("\nPer-tool averages:")
+                for t in tool_stats[:5]:
+                    lines.append(
+                        f"  {t['tool_name'] or '(unknown)':12s}  "
+                        f"{t['total']:4d} conversions  "
+                        f"{t['avg_throughput_mbps']:.2f} MB/s"
+                    )
+            self._set_session_summary("\n".join(lines))
+        except Exception as exc:
+            self._set_session_summary(f"Error loading metrics: {exc}")
+
+    def _set_session_summary(self, text: str):
+        """Helper to safely update the session summary text widget."""
+        try:
+            self._session_summary_text.config(state="normal")
+            self._session_summary_text.delete("1.0", "end")
+            self._session_summary_text.insert("end", text)
+            self._session_summary_text.config(state="disabled")
+        except Exception:
+            pass
 
     def _build_tool_path_row(self, parent, label, path, browse_cmd, btn_text):
         """Build a tool path row for the settings tab."""
@@ -5492,8 +6118,59 @@ obtained ROM files.
         
         return sorted(compressed_files)
     
+    def extract_archive_with_registry(self, archive_path):
+        """Extract a compressed archive using ExtractionRegistry (Phase 3 Week 4 refactored version)
+        
+        Returns tuple of (success: bool, output_dir: Path or None)
+        """
+        if not self.extraction_registry:
+            # Fallback to original implementation
+            return self._extract_archive_original(archive_path)
+        
+        archive_path = Path(archive_path)
+        
+        # Wait for memory pressure before extraction
+        self._wait_for_memory_pressure()
+        
+        # Determine output directory
+        extract_folder = archive_path.parent / archive_path.stem
+        
+        # Handle multi-extension like .tar.gz
+        if archive_path.name.lower().endswith(('.tar.gz', '.tgz')):
+            extract_folder = archive_path.parent / archive_path.name.replace('.tar.gz', '').replace('.tgz', '')
+        elif archive_path.name.lower().endswith(('.tar.bz2', '.tbz2')):
+            extract_folder = archive_path.parent / archive_path.name.replace('.tar.bz2', '').replace('.tbz2', '')
+        elif archive_path.name.lower().endswith(('.tar.xz', '.txz')):
+            extract_folder = archive_path.parent / archive_path.name.replace('.tar.xz', '').replace('.txz', '')
+        
+        try:
+            success, output_dir = self.extraction_registry.extract(archive_path, extract_folder)
+            if success and output_dir:
+                gc.collect()  # Free memory after extraction
+                return True, output_dir
+            else:
+                return False, None
+        except Exception as e:
+            self.log(f"  ❌ Exception in registry extraction: {e}")
+            return False, None
+    
     def extract_archive(self, archive_path):
-        """Extract a compressed archive to a folder with the same name"""
+        """Extract a compressed archive to a folder with the same name
+        
+        Dispatches to ExtractionRegistry if available (Phase 3 Week 4),
+        otherwise uses original implementation for compatibility.
+        
+        Returns tuple of (success: bool, output_dir: Path or None)
+        """
+        # Try registry-based extraction first if available
+        if self.extraction_registry and EXTRACTION_REGISTRY_AVAILABLE:
+            return self.extract_archive_with_registry(archive_path)
+        
+        # Fallback to original implementation
+        return self._extract_archive_original(archive_path)
+    
+    def _extract_archive_original(self, archive_path):
+        """Original extract_archive implementation (kept for compatibility)"""
         archive_path = Path(archive_path)
         
         # Wait for memory pressure before extraction
@@ -6398,8 +7075,78 @@ obtained ROM files.
         self.status_label.config(text=status_text)
         self.convert_button.config(state="normal")
     
+    def convert_game_with_factory(self, path):
+        """Convert a game file using ConverterFactory (Phase 3 Week 4 refactored version)"""
+        if not self.converter_factory:
+            # Fallback to original implementation
+            return self._convert_game_original(path)
+        
+        path = Path(path)
+        ext = path.suffix.lower()
+        
+        # Determine output format based on file type
+        if ext == '.cue':
+            output_format = self.ps1_output_format.upper()
+        elif ext == '.chd':
+            # For CHD extraction, use the target format from preferences
+            is_ps1 = self.process_ps1_cues.get()
+            output_format = self.ps1_output_format.upper() if is_ps1 else self.ps2_output_format.upper()
+        elif ext == '.iso':
+            # Determine system and format
+            iso_size = path.stat().st_size
+            system_guess = self.detect_iso_system(path.name, iso_size, full_path=path)
+            
+            if system_guess == 'PlayStation 3':
+                output_format = 'DECRYPT'
+            elif system_guess == 'Xbox':
+                output_format = 'EXTRACT'
+            elif iso_size < 1.4e9:  # PSP detection
+                output_format = self.psp_output_format.upper()
+            else:
+                output_format = self.ps2_output_format.upper()
+        else:
+            # Other formats use factory's detection
+            output_format = 'AUTO'
+        
+        # Prepare kwargs for factory
+        kwargs = {
+            'max_processors': self.chdman_max_processors,
+            'max_threads': self.maxcso_threads,
+            'treat_as_psp': self.process_psp_isos.get() and not self.process_ps2_isos.get(),
+            'system_guess': self.detect_iso_system(path.name, path.stat().st_size if path.exists() else 0, full_path=path) if ext == '.iso' else None,
+        }
+        
+        # Use factory to convert
+        try:
+            result = self.converter_factory.convert(path, output_format, **kwargs)
+            
+            # Track statistics
+            if result and path.exists():
+                original_size = path.stat().st_size
+                self.total_original_size += original_size
+                self.completed_files.add(str(path))
+                self.save_progress(self.source_dir)
+            
+            return result
+        except Exception as e:
+            self.log(f"  ❌ Exception in factory conversion: {e}")
+            return False
+    
     def convert_game(self, path):
-        """Convert a game file to the selected output format"""
+        """Convert a game file to the selected output format
+        
+        Dispatches to ConverterFactory if available (Phase 3 Week 4),
+        otherwise uses original implementation for compatibility.
+        """
+        # Try factory-based conversion first if available
+        if self.converter_factory and CONVERTER_FACTORY_AVAILABLE:
+            return self.convert_game_with_factory(path)
+        
+        # Fallback to original implementation
+        return self._convert_game_original(path)
+    
+    def _convert_game_original(self, path):
+        """Original convert_game implementation (kept for compatibility)"""
         ext = path.suffix.lower()
         path = Path(path)
 

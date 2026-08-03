@@ -135,7 +135,13 @@ Thumbs.db
 
 # Project-specific
 .rom_converter_config.json
+.rom_converter_progress.json
 rom_converter.spec
+ROM_Converter.spec
+
+# Local credentials / secrets
+Archive.org_keys.txt
+keys.docx
 
 # Bundled binaries (Windows)
 chdman.exe
